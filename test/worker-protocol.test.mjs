@@ -91,8 +91,13 @@ console.log('\n预加载成功路径的真实验证（加载 SenseVoice）')
   const model = cat.findModel('sensevoice')
   let paths = null
   try { paths = cat.modelPaths(model) } catch { }
-  check('能拿到 SenseVoice 的模型路径', !!paths, paths ? '' : '模型文件不在（宿主没装语音输入 Bundle？）')
-  if (paths) {
+  if (!paths) {
+    // 这是一个需要真实 SenseVoice 模型（约 230MB）的集成测试。
+    // CI 上既没有 DSH 语音输入 Bundle，也没下载过模型 —— 硬要在这里
+    // 失败只会让每次 push 都红，而且与代码正确性无关。
+    // 所以模型不在时**跳过**（说明原因），不参与失败计数。
+    console.log('  ⏭ 跳过：本机没有 SenseVoice 模型（宿主未装语音输入 Bundle，且未下载）。需要模型才能真跑预加载。')
+  } else {
     const worker = new Worker(path.join(root, 'lib/asr-worker.js'))
     const done = new Promise((resolve) => {
       worker.on('message', (m) => resolve(m))
