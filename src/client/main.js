@@ -128,9 +128,21 @@ window.__ModuleLoader__.load({
       liveAsrStream: '流式解码（更快）',
       liveAsrAuto: '自动（流式模型用流式）',
       secRecognition: '语音识别',
+      secRecognitionHint: '选择识别模型、语言提示与实时出字方式。',
       secSynthesis: '语音合成',
-      secModels: '模型管理',
-      secInteraction: '交互与后处理',
+      secSynthesisHint: '朗读回复的音色、引擎与语速等参数。',
+      secModels: '模型与下载',
+      secModelsHint: '预加载、空闲释放、环境自检与模型下载。',
+      secInteraction: '语音交互',
+      secInteractionHint: '说完一段之后的行为、断句与发送节奏。',
+      secText: '文本处理',
+      secTextHint: '识别结果的清理与自定义词表。',
+      secAdvanced: '高级与诊断',
+      secAdvancedHint: '排查问题时才需要；平时不用展开。',
+      advancedDiagnostics: '诊断接口',
+      advancedDiagnosticsHint: '宿主 GET /dsh-voice-typing/diagnostics：包含朗读调度器状态、TTS 失败计数、configWarnings（配置清洗告警）等。',
+      advancedDebug: '调试快照',
+      advancedDebugHint: '浏览器控制台执行 __DSH_VOICE_DEBUG__()：查看朗读队列、ack/回退计数、播放上下文状态与高亮诊断。',
       silenceMsHint: '静音多久算说完一句。太短会切断长句，太长回复慢。',
       autoSendHint: '识别完成后自动发送。关闭后文字只留在输入框里。',
       autoSendExtraMs: '发送前等待（毫秒）',
@@ -252,9 +264,21 @@ window.__ModuleLoader__.load({
       liveAsrStream: 'Streaming decode (faster)',
       liveAsrAuto: 'Auto (stream for streaming models)',
       secRecognition: 'Speech recognition',
+      secRecognitionHint: 'Recognition model, language hint and live-text mode.',
       secSynthesis: 'Speech synthesis',
-      secModels: 'Models',
-      secInteraction: 'Interaction & post-processing',
+      secSynthesisHint: 'Voice, engine and speaking parameters for read-aloud replies.',
+      secModels: 'Models & downloads',
+      secModelsHint: 'Preload, idle release, environment check and model downloads.',
+      secInteraction: 'Voice interaction',
+      secInteractionHint: 'What happens after a turn, silence detection and send timing.',
+      secText: 'Text processing',
+      secTextHint: 'Post-processing of recognition results and custom word list.',
+      secAdvanced: 'Advanced & diagnostics',
+      secAdvancedHint: 'Only needed for troubleshooting; usually collapsed.',
+      advancedDiagnostics: 'Diagnostics endpoint',
+      advancedDiagnosticsHint: 'Host GET /dsh-voice-typing/diagnostics: read-aloud scheduler state, TTS failure counters, configWarnings and more.',
+      advancedDebug: 'Debug snapshot',
+      advancedDebugHint: 'Run __DSH_VOICE_DEBUG__() in the browser console: read-aloud queue, ack/fallback counters, playback context state and highlight diagnostics.',
       silenceMsHint: 'How long silence counts as "finished". Too short cuts long sentences, too long delays replies.',
       autoSendHint: 'Send automatically after recognition. When off, text stays in the composer.',
       autoSendExtraMs: 'Wait before sending (ms)',
@@ -3533,14 +3557,14 @@ window.__ModuleLoader__.load({
     const Label = (props) => React.createElement('label', { style: labelStyle }, props.children)
 
     /**
-     * 分组标题。
-     * 设置项按「识别 / 合成 / 交互 / 高级」分组，
-     * 否则二十多个选项平铺在一起根本分不清谁管什么。
+     * 分组标题（可带说明，可折叠）。
+     *
+     * 用原生 `<details>/<summary>` 做折叠：SSR 友好、不依赖 hooks/state，
+     * 浏览器里默认就是「点标题展开/收起」。高级与诊断区默认收起。
+     * @param {{title: string, subtitle?: string, collapsible?: boolean, defaultOpen?: boolean, children?: any}} props
      */
-    const Section = (props) => React.createElement(
-      'div',
-      { style: { marginBottom: 18 } },
-      React.createElement(
+    const Section = (props) => {
+      const titleRow = React.createElement(
         'div',
         {
           style: {
@@ -3548,13 +3572,63 @@ window.__ModuleLoader__.load({
             fontWeight: 600,
             opacity: 0.65,
             letterSpacing: '0.04em',
-            marginBottom: 10,
+            marginBottom: props.subtitle ? 4 : 10,
             paddingBottom: 5,
             borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.08))',
           },
         },
         props.title,
-      ),
+      )
+      const subtitle = props.subtitle
+        ? React.createElement(
+            'div',
+            { style: { fontSize: 12, opacity: 0.6, marginBottom: 10, lineHeight: 1.5 } },
+            props.subtitle,
+          )
+        : null
+      const body = React.createElement('div', null, props.children)
+      if (!props.collapsible) {
+        return React.createElement(
+          'div',
+          { style: { marginBottom: 18 } },
+          titleRow,
+          subtitle,
+          body,
+        )
+      }
+      // 折叠态：原生 <details>/<summary>（浏览器自带可更新的展开箭头，SSR 直接输出）。
+      // `defaultOpen=false` 时不写 open 属性 → 默认收起。
+      const detailsProps = { style: { marginBottom: 18 } }
+      if (props.defaultOpen !== false) detailsProps.open = true
+      return React.createElement(
+        'details',
+        detailsProps,
+        React.createElement(
+          'summary',
+          { style: { cursor: 'pointer', outline: 'none' } },
+          titleRow,
+          subtitle,
+        ),
+        body,
+      )
+    }
+
+    /**
+     * 短字段并排（紧凑布局）。
+     *
+     * 窄面板自动换列（auto-fit + minmax）；**模块级组件**（不能有 hooks，
+     * 否则每次渲染类型都变、输入框会失焦）。
+     */
+    const Row = (props) => React.createElement(
+      'div',
+      {
+        style: {
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+          columnGap: 14,
+          alignItems: 'start',
+        },
+      },
       props.children,
     )
 
@@ -3952,7 +4026,7 @@ window.__ModuleLoader__.load({
         /* ============ 一、语音识别 ============ */
         React.createElement(
           Section,
-          { title: t('secRecognition') },
+          { title: t('secRecognition'), subtitle: t('secRecognitionHint'), collapsible: true },
           React.createElement(
             Label,
             null,
@@ -4012,59 +4086,6 @@ window.__ModuleLoader__.load({
                 ? React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warning, #9a6700)' } }, t('languageNotInModel'))
                 : null,
           ),
-          React.createElement(
-            Label,
-            null,
-            React.createElement('span', null, t('mode')),
-            React.createElement(
-              'select',
-              {
-                value: modeValue,
-                onChange: (event) => set('mode', event.target.value),
-                style: inputStyle,
-              },
-              [
-                { value: 'toggle', label: t('modeToggle'), disabled: false },
-                // 「说完就关」的退出发生在自动发送分支里：autoSend 关闭时它不会生效。
-                { value: 'once', label: t('modeOnce'), disabled: autoSendOff },
-              ].map((item) => React.createElement(
-                'option',
-                { key: item.value, value: item.value, disabled: item.disabled },
-                item.label,
-              )),
-            ),
-            React.createElement(
-              'span',
-              { style: { fontSize: 12, opacity: 0.7 } },
-              t('modeHint'),
-            ),
-            onceUnavailable
-              ? React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warning, #9a6700)' } }, t('modeOnceNeedsAutoSend'))
-              : null,
-          ),
-          // 断句时长：直接决定「说完一句」判定，影响体验最明显
-          React.createElement(
-            Label,
-            null,
-            React.createElement('span', null, t('silenceMs')),
-            React.createElement(
-              'input',
-              {
-                type: 'number',
-                min: 500,
-                max: 5000,
-                step: 100,
-                value: config.silenceMs ?? 1500,
-                onChange: (event) => set('silenceMs', Math.max(500, Math.min(5000, Number(event.target.value) || 1500))),
-                style: { ...inputStyle, width: 120 },
-              },
-            ),
-            React.createElement(
-              'span',
-              { style: { fontSize: 12, opacity: 0.7 } },
-              t('silenceMsHint'),
-            ),
-          ),
 
           /* 实时字方式：整段重识别 vs 流式解码 */
           React.createElement(
@@ -4098,6 +4119,42 @@ window.__ModuleLoader__.load({
               ? React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warning, #9a6700)' } }, t('liveAsrStreamNeedsModel'))
               : null,
           ),
+        ),
+
+        /* ============ 二、语音交互 ============ */
+        React.createElement(
+          Section,
+          { title: t('secInteraction'), subtitle: t('secInteractionHint'), collapsible: true },
+          React.createElement(
+            Label,
+            null,
+            React.createElement('span', null, t('mode')),
+            React.createElement(
+              'select',
+              {
+                value: modeValue,
+                onChange: (event) => set('mode', event.target.value),
+                style: inputStyle,
+              },
+              [
+                { value: 'toggle', label: t('modeToggle'), disabled: false },
+                // 「说完就关」的退出发生在自动发送分支里：autoSend 关闭时它不会生效。
+                { value: 'once', label: t('modeOnce'), disabled: autoSendOff },
+              ].map((item) => React.createElement(
+                'option',
+                { key: item.value, value: item.value, disabled: item.disabled },
+                item.label,
+              )),
+            ),
+            React.createElement(
+              'span',
+              { style: { fontSize: 12, opacity: 0.7 } },
+              t('modeHint'),
+            ),
+            onceUnavailable
+              ? React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warning, #9a6700)' } }, t('modeOnceNeedsAutoSend'))
+              : null,
+          ),
           React.createElement(
             Toggle,
             {
@@ -4107,37 +4164,142 @@ window.__ModuleLoader__.load({
               onChange: (v) => set('autoSend', v),
             },
           ),
-          // 只有自动发送打开时，「发送前等待」才有意义
-          config.autoSend !== false
-            ? React.createElement(
-                Label,
-                null,
-                React.createElement('span', null, t('autoSendExtraMs')),
-                React.createElement(
-                  'input',
-                  {
-                    type: 'number',
-                    min: 0,
-                    max: 5000,
-                    step: 100,
-                    value: config.autoSendExtraMs ?? UI_DEFAULTS.autoSendExtraMs,
-                    onChange: (event) => set('autoSendExtraMs', clampAutoSendExtraMs(event.target.value)),
-                    style: { ...inputStyle, width: 120 },
-                  },
-                ),
-                React.createElement(
+          // 短字段并排：断句时长 + 发送前等待（后者只在自动发送打开时有意义）
+          React.createElement(
+            Row,
+            null,
+            // 断句时长：直接决定「说完一句」判定，影响体验最明显
+            React.createElement(
+              Label,
+              null,
+              React.createElement('span', null, t('silenceMs')),
+              React.createElement(
+                'input',
+                {
+                  type: 'number',
+                  min: 500,
+                  max: 5000,
+                  step: 100,
+                  value: config.silenceMs ?? 1500,
+                  onChange: (event) => set('silenceMs', Math.max(500, Math.min(5000, Number(event.target.value) || 1500))),
+                  style: { ...inputStyle, width: 120 },
+                },
+              ),
+              React.createElement(
+                'span',
+                { style: { fontSize: 12, opacity: 0.7 } },
+                t('silenceMsHint'),
+              ),
+            ),
+            config.autoSend !== false
+              ? React.createElement(
+                  Label,
+                  null,
+                  React.createElement('span', null, t('autoSendExtraMs')),
+                  React.createElement(
+                    'input',
+                    {
+                      type: 'number',
+                      min: 0,
+                      max: 5000,
+                      step: 100,
+                      value: config.autoSendExtraMs ?? UI_DEFAULTS.autoSendExtraMs,
+                      onChange: (event) => set('autoSendExtraMs', clampAutoSendExtraMs(event.target.value)),
+                      style: { ...inputStyle, width: 120 },
+                    },
+                  ),
+                  React.createElement(
+                    'span',
+                    { style: { fontSize: 12, opacity: 0.7 } },
+                    t('autoSendExtraMsHint'),
+                  ),
+                )
+              : null,
+          ),
+          // 快捷键单独一行（输入框需要完整宽度）
+          React.createElement(
+            Label,
+            null,
+            React.createElement('span', null, t('shortcut')),
+            React.createElement('input', {
+              value: config.shortcut ?? UI_DEFAULTS.shortcut,
+              onChange: (event) => set('shortcut', event.target.value),
+              placeholder: UI_DEFAULTS.shortcut,
+              // 聚焦这个输入框时，快捷键不应该触发录音。
+              onFocus: () => { shortcutFieldFocused = true },
+              onBlur: () => { shortcutFieldFocused = false },
+              style: inputStyle,
+            }),
+            React.createElement('span', { style: { fontSize: 12, opacity: 0.7 } }, t('shortcutHint')),
+            !shortcutCheck.ok
+              ? React.createElement(
                   'span',
-                  { style: { fontSize: 12, opacity: 0.7 } },
-                  t('autoSendExtraMsHint'),
-                ),
-              )
-            : null,
+                  { style: { fontSize: 12, color: 'var(--dsw-alias-state-danger, #d13438)' } },
+                  shortcutCheck.message,
+                )
+              : null,
+          ),
         ),
 
-        /* ============ 二、语音合成 ============ */
+        /* ============ 三、文本处理 ============ */
         React.createElement(
           Section,
-          { title: t('secSynthesis') },
+          { title: t('secText'), subtitle: t('secTextHint'), collapsible: true },
+          React.createElement(
+            Toggle,
+            {
+              label: t('removeFillers'),
+              hint: t('removeFillersHint'),
+              checked: config.removeFillers === true,
+              onChange: (v) => set('removeFillers', v),
+            },
+          ),
+          React.createElement(
+            Label,
+            null,
+            React.createElement('span', null, t('words')),
+            React.createElement('textarea', {
+              // 显示用户原始输入；空格/换行在失焦或保存时才归一化（审计 F1：
+              // 旧实现每键 split/trim/filter，键盘根本打不出空格和换行）。
+              value: wordsText,
+              onChange: (event) => {
+                setWordsText(event.target.value)
+                setDirty(true)
+              },
+              onBlur: () => set('words', parseWordsText(wordsText)),
+              placeholder: '正确=错误\n专业术语',
+              rows: 5,
+              style: { ...inputStyle, resize: 'vertical' },
+            }),
+            React.createElement('span', { style: { fontSize: 12, opacity: 0.7 } }, t('wordsHint')),
+          ),
+        ),
+
+        /* ============ 四、语音合成 ============ */
+        React.createElement(
+          Section,
+          { title: t('secSynthesis'), subtitle: t('secSynthesisHint'), collapsible: true },
+          // 当前合成方式放在本区顶部（原在模型管理区）：先看到「现在用什么在念」。
+          React.createElement(
+            'div',
+            {
+              style: {
+                fontSize: 12,
+                marginBottom: 10,
+                padding: '8px 10px',
+                border: '1px solid var(--dsw-alias-border-l3, rgba(0,0,0,0.12))',
+                borderRadius: 8,
+                opacity: 0.9,
+              },
+            },
+            `${t('ttsCurrent')}: ${engine === 'sovits'
+              ? `GPT-SoVITS (${config.sovitsUrl ?? 'http://127.0.0.1:9880'})`
+              : engine === 'neural'
+                ? (readyNeural.find((x) => x.id === config.neuralModel)?.label ?? t('neuralNoModel'))
+                : engine === 'local'
+                  ? (voiceLabel(config.localVoice ?? '') || t('localVoiceDefault'))
+                  : (voiceLabel(config.voice ?? '') || (config.voice ?? ''))}`,
+          ),
           // 总开关放最前：关掉时整个合成区无意义
           React.createElement(
             Toggle,
@@ -4417,104 +4579,178 @@ window.__ModuleLoader__.load({
                       ),
                     ),
 
-                /* 语速：四种引擎都支持 */
+                /* 短字段并排：语速 + 音调（+音量/格式按引擎条件） */
                 React.createElement(
-                  Label,
+                  Row,
                   null,
-                  React.createElement('span', null, t('rate')),
+                  // 语速：四种引擎都支持
                   React.createElement(
-                    'select',
-                    {
-                      value: rateValue,
-                      onChange: (event) => set('rate', event.target.value),
-                      style: inputStyle,
-                    },
-                    withCurrentOption(RATE_OPTIONS, rateValue)
-                      .map((v) => React.createElement('option', { key: v, value: v }, v)),
+                    Label,
+                    null,
+                    React.createElement('span', null, t('rate')),
+                    React.createElement(
+                      'select',
+                      {
+                        value: rateValue,
+                        onChange: (event) => set('rate', event.target.value),
+                        style: inputStyle,
+                      },
+                      withCurrentOption(RATE_OPTIONS, rateValue)
+                        .map((v) => React.createElement('option', { key: v, value: v }, v)),
+                    ),
                   ),
+                  // 音调：只有在线 Edge 支持
+                  isOnline
+                    ? React.createElement(
+                        Label,
+                        null,
+                        React.createElement('span', null, t('pitch')),
+                        React.createElement(
+                          'select',
+                          {
+                            value: pitchValue,
+                            onChange: (event) => set('pitch', event.target.value),
+                            style: inputStyle,
+                          },
+                          withCurrentOption(PITCH_OPTIONS, pitchValue)
+                            .map((v) => React.createElement('option', { key: v, value: v }, v)),
+                        ),
+                      )
+                    : null,
+                  // 音量：神经模型与 GPT-SoVITS 外部服务不支持
+                  !isNeural && !isSovits
+                    ? React.createElement(
+                        Label,
+                        null,
+                        React.createElement('span', null, t('volume')),
+                        React.createElement(
+                          'select',
+                          {
+                            value: volumeValue,
+                            onChange: (event) => set('volume', event.target.value),
+                            style: inputStyle,
+                          },
+                          withCurrentOption(VOLUME_OPTIONS, volumeValue)
+                            .map((v) => React.createElement('option', { key: v, value: v }, v)),
+                        ),
+                      )
+                    : null,
+                  // 音频格式：只有在线 Edge 支持
+                  isOnline
+                    ? React.createElement(
+                        Label,
+                        null,
+                        React.createElement('span', null, t('ttsFormat')),
+                        React.createElement(
+                          'select',
+                          {
+                            value: ttsFormatValue,
+                            onChange: (event) => set('ttsFormat', event.target.value),
+                            style: inputStyle,
+                          },
+                          [
+                            ['AUDIO_24KHZ_48KBITRATE_MONO_MP3', 'MP3 24kHz/48kbps（推荐，体积小）'],
+                            ['AUDIO_24KHZ_96KBITRATE_MONO_MP3', 'MP3 24kHz/96kbps（音质更好）'],
+                            // 注意：msedge-tts 的 OUTPUT_FORMAT 里只有上面这两个键。
+                            // 之前还有个「48kHz/192kbps」的选项，但 vendor 根本没有这个键，
+                            // 选它会被静默回落到 24kHz/48kbps —— 用户以为换了格式，其实没换。
+                            // 真要更高音质得改用本地神经引擎。
+                          ].map(([v, label]) => React.createElement('option', { key: v, value: v }, label)),
+                        ),
+                      )
+                    : null,
                 ),
-                /* 音调：只有在线 Edge 支持 */
-                isOnline
-                  ? React.createElement(
-                      Label,
-                      null,
-                      React.createElement('span', null, t('pitch')),
-                      React.createElement(
-                        'select',
-                        {
-                          value: pitchValue,
-                          onChange: (event) => set('pitch', event.target.value),
-                          style: inputStyle,
-                        },
-                        withCurrentOption(PITCH_OPTIONS, pitchValue)
-                          .map((v) => React.createElement('option', { key: v, value: v }, v)),
-                      ),
-                    )
-                  : null,
-                /* 音量：神经模型与 GPT-SoVITS 外部服务不支持 */
-                !isNeural && !isSovits
-                  ? React.createElement(
-                      Label,
-                      null,
-                      React.createElement('span', null, t('volume')),
-                      React.createElement(
-                        'select',
-                        {
-                          value: volumeValue,
-                          onChange: (event) => set('volume', event.target.value),
-                          style: inputStyle,
-                        },
-                        withCurrentOption(VOLUME_OPTIONS, volumeValue)
-                          .map((v) => React.createElement('option', { key: v, value: v }, v)),
-                      ),
-                    )
-                  : null,
-                /* 音频格式：只有在线 Edge 支持 */
-                isOnline
-                  ? React.createElement(
-                      Label,
-                      null,
-                      React.createElement('span', null, t('ttsFormat')),
-                      React.createElement(
-                        'select',
-                        {
-                          value: ttsFormatValue,
-                          onChange: (event) => set('ttsFormat', event.target.value),
-                          style: inputStyle,
-                        },
-                        [
-                          ['AUDIO_24KHZ_48KBITRATE_MONO_MP3', 'MP3 24kHz/48kbps（推荐，体积小）'],
-                          ['AUDIO_24KHZ_96KBITRATE_MONO_MP3', 'MP3 24kHz/96kbps（音质更好）'],
-                          // 注意：msedge-tts 的 OUTPUT_FORMAT 里只有上面这两个键。
-                          // 之前还有个「48kHz/192kbps」的选项，但 vendor 根本没有这个键，
-                          // 选它会被静默回落到 24kHz/48kbps —— 用户以为换了格式，其实没换。
-                          // 真要更高音质得改用本地神经引擎。
-                        ].map(([v, label]) => React.createElement('option', { key: v, value: v }, label)),
-                      ),
-                    )
-                  : null,
             ),
         ),
 
-        /* ============ 三、模型与下载管理 ============ */
+        /* ============ 五、模型与下载 ============ */
         React.createElement(
           Section,
-          { title: t('secModels') },
+          { title: t('secModels'), subtitle: t('secModelsHint'), collapsible: true },
+          // 预加载
+          React.createElement(
+            Toggle,
+            {
+              label: t('preloadModels'),
+              hint: t('preloadModelsHint'),
+              checked: config.preloadModels !== false,
+              onChange: (v) => set('preloadModels', v),
+            },
+          ),
+          // 短字段并排：空闲释放 + 环境自检
+          React.createElement(
+            Row,
+            null,
+            React.createElement(
+              Label,
+              null,
+              React.createElement('span', null, t('idleReleaseMinutes')),
+              React.createElement(
+                'select',
+                {
+                  value: String(idleValue),
+                  onChange: (event) => set('idleReleaseMinutes', Number(event.target.value)),
+                  style: inputStyle,
+                },
+                withCurrentOption(
+                  IDLE_RELEASE_OPTIONS.map((v) => String(v)),
+                  String(idleValue),
+                ).map((v) => React.createElement(
+                  'option',
+                  { key: v, value: v },
+                  {
+                    0: '永不释放', 5: '5 分钟', 10: '10 分钟', 30: '30 分钟', 60: '1 小时',
+                  }[v] ?? `${v} 分钟`,
+                )),
+              ),
+              React.createElement(
+                'span',
+                { style: { fontSize: 12, opacity: 0.7 } },
+                t('idleReleaseMinutesHint'),
+              ),
+            ),
+            React.createElement(
+              Label,
+              null,
+              React.createElement('span', null, t('envCheck')),
+              React.createElement(
+                'button',
+                {
+                  type: 'button',
+                  onClick: () => void runEnvCheck(),
+                  style: {
+                    padding: '4px 10px',
+                    borderRadius: 6,
+                    border: '1px solid var(--dsw-alias-border-l3, rgba(0,0,0,0.12))',
+                    background: 'transparent',
+                    color: 'inherit',
+                    fontSize: 12,
+                    cursor: 'pointer',
+                  },
+                },
+                checkingEnv ? t('envChecking') : t('envRecheck'),
+              ),
+            ),
+          ),
+          envInfo
+            ? React.createElement(
+                'div',
+                { style: { fontSize: 12, opacity: 0.85, marginBottom: 12, lineHeight: 1.7 } },
+                React.createElement('div', null, `平台：${envInfo.platform} ${envInfo.arch}`),
+                React.createElement('div', null, `显卡：${envInfo.gpu?.available ? envInfo.gpu.name + ' (' + envInfo.gpu.memoryMB + 'MB)' : '未检测到 NVIDIA 显卡'}`),
+                // 引擎行：兼容宿主的两种行形状（{available,detail} / 新 sovits 行
+                // {supported, url, configured}），字段缺失不崩（审计 F10）。
+                ...envEngines.map((e) => React.createElement(
+                  'div',
+                  { key: e.id, style: { opacity: e.current ? 1 : 0.85 } },
+                  `${e.status === 'ok' ? '✓' : e.status === 'bad' ? '✗' : '·'} ${e.label}${e.current ? `（${t('envCurrent')}）` : ''}${e.detail ? '：' + e.detail : ''}`,
+                )),
+              )
+            : null,
+          // 模型下载列表（ASR + TTS）
           React.createElement(
             'div',
             { style: { padding: '8px 10px', border: '1px solid var(--dsw-alias-border-l3, rgba(0,0,0,0.12))', borderRadius: 8 } },
-            // 当前实际用的合成方式（在线/系统语音时不在模型列表里，单独说明）
-            React.createElement(
-              'div',
-              { style: { fontSize: 12, marginBottom: 8, opacity: 0.85 } },
-              `${t('ttsCurrent')}: ${engine === 'sovits'
-                ? `GPT-SoVITS (${config.sovitsUrl ?? 'http://127.0.0.1:9880'})`
-                : engine === 'neural'
-                  ? (readyNeural.find((x) => x.id === config.neuralModel)?.label ?? t('neuralNoModel'))
-                  : engine === 'local'
-                    ? (voiceLabel(config.localVoice ?? '') || t('localVoiceDefault'))
-                    : (voiceLabel(config.voice ?? '') || (config.voice ?? ''))}`,
-            ),
             ...[
               { key: 'asr', title: t('modelGroupAsr'), list: asrModels },
               { key: 'tts', title: t('modelGroupTts'), list: ttsModels },
@@ -4585,138 +4821,23 @@ window.__ModuleLoader__.load({
                 )
               : null,
           ),
-          // 预加载与空闲释放
-          React.createElement(
-            Toggle,
-            {
-              label: t('preloadModels'),
-              hint: t('preloadModelsHint'),
-              checked: config.preloadModels !== false,
-              onChange: (v) => set('preloadModels', v),
-            },
-          ),
-          React.createElement(
-            Label,
-            null,
-            React.createElement('span', null, t('idleReleaseMinutes')),
-            React.createElement(
-              'select',
-              {
-                        value: String(idleValue),
-                        onChange: (event) => set('idleReleaseMinutes', Number(event.target.value)),
-                        style: inputStyle,
-                      },
-                      withCurrentOption(
-                        IDLE_RELEASE_OPTIONS.map((v) => String(v)),
-                        String(idleValue),
-                      ).map((v) => React.createElement(
-                        'option',
-                        { key: v, value: v },
-                        {
-                          0: '永不释放', 5: '5 分钟', 10: '10 分钟', 30: '30 分钟', 60: '1 小时',
-                        }[v] ?? `${v} 分钟`,
-                      )),
-                    ),
-            React.createElement(
-              'span',
-              { style: { fontSize: 12, opacity: 0.7 } },
-              t('idleReleaseMinutesHint'),
-            ),
-          ),
-
-          // 环境自检
-          React.createElement(
-            Label,
-            null,
-            React.createElement('span', null, t('envCheck')),
-            React.createElement(
-              'button',
-              {
-                type: 'button',
-                onClick: () => void runEnvCheck(),
-                style: {
-                  padding: '4px 10px',
-                  borderRadius: 6,
-                  border: '1px solid var(--dsw-alias-border-l3, rgba(0,0,0,0.12))',
-                  background: 'transparent',
-                  color: 'inherit',
-                  fontSize: 12,
-                  cursor: 'pointer',
-                },
-              },
-              checkingEnv ? t('envChecking') : t('envRecheck'),
-            ),
-          ),
-          envInfo
-            ? React.createElement(
-                'div',
-                { style: { fontSize: 12, opacity: 0.85, marginBottom: 12, lineHeight: 1.7 } },
-                React.createElement('div', null, `平台：${envInfo.platform} ${envInfo.arch}`),
-                React.createElement('div', null, `显卡：${envInfo.gpu?.available ? envInfo.gpu.name + ' (' + envInfo.gpu.memoryMB + 'MB)' : '未检测到 NVIDIA 显卡'}`),
-                // 引擎行：兼容宿主的两种行形状（{available,detail} / 新 sovits 行
-                // {supported, url, configured}），字段缺失不崩（审计 F10）。
-                ...envEngines.map((e) => React.createElement(
-                  'div',
-                  { key: e.id, style: { opacity: e.current ? 1 : 0.85 } },
-                  `${e.status === 'ok' ? '✓' : e.status === 'bad' ? '✗' : '·'} ${e.label}${e.current ? `（${t('envCurrent')}）` : ''}${e.detail ? '：' + e.detail : ''}`,
-                )),
-              )
-            : null,
         ),
 
-        /* ============ 四、交互与后处理 ============ */
+        /* ============ 六、高级与诊断（默认收起） ============ */
         React.createElement(
           Section,
-          { title: t('secInteraction') },
+          { title: t('secAdvanced'), subtitle: t('secAdvancedHint'), collapsible: true, defaultOpen: false },
           React.createElement(
-            Label,
-            null,
-            React.createElement('span', null, t('shortcut')),
-            React.createElement('input', {
-              value: config.shortcut ?? UI_DEFAULTS.shortcut,
-              onChange: (event) => set('shortcut', event.target.value),
-              placeholder: UI_DEFAULTS.shortcut,
-              // 聚焦这个输入框时，快捷键不应该触发录音。
-              onFocus: () => { shortcutFieldFocused = true },
-              onBlur: () => { shortcutFieldFocused = false },
-              style: inputStyle,
-            }),
-            React.createElement('span', { style: { fontSize: 12, opacity: 0.7 } }, t('shortcutHint')),
-            !shortcutCheck.ok
-              ? React.createElement(
-                  'span',
-                  { style: { fontSize: 12, color: 'var(--dsw-alias-state-danger, #d13438)' } },
-                  shortcutCheck.message,
-                )
-              : null,
+            'div',
+            { style: { fontSize: 12, opacity: 0.8, lineHeight: 1.7 } },
+            React.createElement('div', { style: { fontWeight: 600, marginBottom: 2 } }, t('advancedDiagnostics')),
+            React.createElement('div', null, t('advancedDiagnosticsHint')),
           ),
           React.createElement(
-            Toggle,
-            {
-              label: t('removeFillers'),
-              hint: t('removeFillersHint'),
-              checked: config.removeFillers === true,
-              onChange: (v) => set('removeFillers', v),
-            },
-          ),
-          React.createElement(
-            Label,
-            null,
-            React.createElement('span', null, t('words')),
-            React.createElement('textarea', {
-              // 显示用户原始输入；空格/换行在失焦或保存时才归一化（审计 F1：
-              // 旧实现每键 split/trim/filter，键盘根本打不出空格和换行）。
-              value: wordsText,
-              onChange: (event) => {
-                setWordsText(event.target.value)
-                setDirty(true)
-              },
-              onBlur: () => set('words', parseWordsText(wordsText)),
-              placeholder: '正确=错误\n专业术语',
-              rows: 5,
-              style: { ...inputStyle, resize: 'vertical' },
-            }),
-            React.createElement('span', { style: { fontSize: 12, opacity: 0.7 } }, t('wordsHint')),
+            'div',
+            { style: { fontSize: 12, opacity: 0.8, lineHeight: 1.7, marginTop: 8 } },
+            React.createElement('div', { style: { fontWeight: 600, marginBottom: 2 } }, t('advancedDebug')),
+            React.createElement('div', null, t('advancedDebugHint')),
           ),
         ),
 

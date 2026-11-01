@@ -268,5 +268,50 @@ console.log('\nB. 源码形状：词表输入 / 回退提示 / 保存错误')
     /shortcutFieldFocused = false \}, \[\]\)/.test(CLI))
 }
 
+console.log('\nC. 布局重构：6 组分区 + 说明 + 折叠 + 并排（task-19）')
+{
+  // 组件实现：Section 可折叠/说明；Row 是模块级 grid 组件（不能在组件体内定义，
+  // 否则每次渲染类型变化 → 输入框失焦）。
+  check('Section 支持 subtitle/collapsible/defaultOpen',
+    /props\.subtitle/.test(CLI) && /props\.collapsible/.test(CLI) && /props\.defaultOpen/.test(CLI))
+  check('Section 用原生 details/summary 实现折叠',
+    /React\.createElement\(\s*'details'/.test(CLI) && /React\.createElement\(\s*'summary'/.test(CLI))
+  check('Row 用 grid auto-fit 并排短字段',
+    /const Row = \(props\) => React\.createElement\(/.test(CLI) && /minmax\(220px, 1fr\)/.test(CLI))
+  check('Row 定义在模块级、位于设置组件之前',
+    CLI.indexOf('const Row = (props)') >= 0
+    && CLI.indexOf('const Row = (props)') < CLI.indexOf('function VoiceSettingsSection'))
+
+  const html = render({})
+  const groups = ['secRecognition', 'secInteraction', 'secText', 'secSynthesis', 'secModels', 'secAdvanced']
+  const positions = groups.map((key) => html.indexOf('>' + key + '<'))
+  check('6 个分组全部渲染', positions.every((i) => i >= 0), JSON.stringify(positions))
+  check('分组顺序固定', positions.every((v, i) => i === 0 || v > positions[i - 1]))
+
+  const sliceOf = (startKey, endKey) => {
+    const start = html.indexOf('>' + startKey + '<')
+    const end = endKey === null ? html.indexOf('</details>', start) : html.indexOf('>' + endKey + '<')
+    return start >= 0 && end > start ? html.slice(start, end) : ''
+  }
+  const synthesis = sliceOf('secSynthesis', 'secModels')
+  const models = sliceOf('secModels', 'secAdvanced')
+  const advanced = sliceOf('secAdvanced', null)
+  check('「当前合成方式」在合成组顶部（不再在模型组）',
+    synthesis.includes('ttsCurrent') && !models.includes('ttsCurrent'))
+  check('高级组无配置控件（纯说明）',
+    !advanced.includes('<input') && !advanced.includes('<select')
+    && !advanced.includes('<textarea') && !advanced.includes('<button'))
+  const detailsTags = html.match(/<details[^>]*>/g) || []
+  check('6 组都可折叠，高级组默认收起',
+    detailsTags.length === 6
+    && detailsTags.slice(0, 5).every((tag) => /\bopen\b/.test(tag))
+    && !/\bopen\b/.test(detailsTags[5]))
+  check('分组说明齐全',
+    ['secRecognitionHint', 'secInteractionHint', 'secTextHint', 'secSynthesisHint', 'secModelsHint', 'secAdvancedHint']
+      .every((key) => html.includes(key)))
+  check('以并排短字段行承载数值字段（≥3 行）',
+    (html.match(/minmax\(220px, 1fr\)/g) || []).length >= 3)
+}
+
 console.log(`\n通过 ${passed}，失败 ${failed}`)
 if (failed > 0) process.exit(1)

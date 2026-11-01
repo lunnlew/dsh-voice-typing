@@ -120,6 +120,22 @@ if (MicComponent) {
       check('设置面板默认态渲染成功', html.length > 0, '空 HTML')
       check('readAloud=false 时仍显示语音引擎（可预配 TTS）', html.includes('>ttsEngine<'))
       check('readAloud=false 时显示「仅保存、不生效」提示', html.includes('readAloudOffNotice'))
+      // task-19：6 个分组、分组说明、高级默认收起、短字段并排。
+      const groups = ['secRecognition', 'secInteraction', 'secText', 'secSynthesis', 'secModels', 'secAdvanced']
+      const positions = groups.map((key) => html.indexOf('>' + key + '<'))
+      check('设置面板按 6 个分组渲染', positions.every((i) => i >= 0), JSON.stringify(positions))
+      check('分组顺序符合页面结构', positions.every((v, i) => i === 0 || v > positions[i - 1]))
+      check('每个分组都有说明文字',
+        ['secRecognitionHint', 'secInteractionHint', 'secTextHint', 'secSynthesisHint', 'secModelsHint', 'secAdvancedHint']
+          .every((key) => html.includes(key)))
+      const detailsTags = html.match(/<details[^>]*>/g) || []
+      check('6 个分组都用原生 details 实现折叠', detailsTags.length === 6, String(detailsTags.length))
+      check('高级分组默认收起，其余分组默认展开',
+        detailsTags.length === 6
+        && detailsTags.slice(0, 5).every((tag) => /\bopen\b/.test(tag))
+        && !/\bopen\b/.test(detailsTags[5]))
+      check('短字段使用并排布局（grid auto-fit）',
+        (html.match(/minmax\(220px, 1fr\)/g) || []).length >= 1)
     } catch (error) {
       check('设置面板默认态渲染成功', false, error && error.message)
     }

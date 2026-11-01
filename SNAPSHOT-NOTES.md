@@ -401,6 +401,15 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
 - **UI 联动/依赖**：language 只对 SenseVoice 生效；`liveAsr=stream` 依赖 zipformer2-zh；`autoSend=false` 时 `mode=once` 禁用；朗读关闭时仍可预配引擎；`words` 输入保留原始文本、保存时归一化；reload 不再清掉未保存修改；本地→在线回退会在 UI 提示。
 - 见 README「配置项的配合关系（生效条件矩阵）」。
 
+### 7.11 设置面板分组（2026-11）
+
+- 面板重排为 6 个**可折叠**分区（原生 `<details>/<summary>`，SSR 友好）：
+  语音识别 → 语音交互 → 文本处理 → 语音合成 → 模型与下载 → 高级与诊断（默认收起，仅诊断入口）。
+- 每组带一行说明；短字段用 grid 并排（静音断句+发送前等待、语速+音调(+音量/格式)、空闲释放+环境自检）。
+- 「当前合成方式」移到语音合成区顶部；模型下载列表保留在模型与下载区。
+- 配置语义不变：字段、`set()` 键、条件显隐都保留；仅移动位置/增加分组说明。
+- 回归：`test/render.test.mjs`（SSR 分组断言）、`test/config-link.test.mjs`、`test/config-ui.test.mjs`。
+
 ## 已知限制
 
 1. **本地 TTS 每次要起 PowerShell 进程**（~800ms），可以改成常驻进程但复杂度高

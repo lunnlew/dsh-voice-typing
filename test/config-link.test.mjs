@@ -231,14 +231,75 @@ console.log('\n[5] liveAsr 依赖提示')
   setFakeModels([])
 }
 
-// ── 6. 分组 ───────────────────────────────────────────
-console.log('\n[6] 分组标题')
+// ── 6. 分组结构（task-19：6 组顺序 + 字段归属 + 说明 + 高级默认收起） ──
+console.log('\n[6] 分组结构')
 {
   const html = render({})
-  check('有「语音识别」分组', html.includes('secRecognition'))
-  check('有「语音合成」分组', html.includes('secSynthesis'))
-  check('有「模型管理」分组', html.includes('secModels'))
-  check('有「交互与后处理」分组', html.includes('secInteraction'))
+  const groupOrder = ['secRecognition', 'secInteraction', 'secText', 'secSynthesis', 'secModels', 'secAdvanced']
+  const positions = groupOrder.map((key) => html.indexOf('>' + key + '<'))
+  check('6 个分组都渲染', positions.every((i) => i >= 0), JSON.stringify(positions))
+  check('分组顺序：识别→交互→文本→合成→模型→高级',
+    positions.every((v, i) => i === 0 || v > positions[i - 1]), JSON.stringify(positions))
+
+  // 分组说明（每个分组标题下方都有小字说明）
+  for (const key of ['secRecognitionHint', 'secInteractionHint', 'secTextHint', 'secSynthesisHint', 'secModelsHint', 'secAdvancedHint']) {
+    check('分组说明存在：' + key, html.includes(key))
+  }
+
+  /** 取某个分组标题到下一个分组标题之间的 HTML（用于断言字段归属）。 */
+  const sliceOf = (startKey, endKey) => {
+    const start = html.indexOf('>' + startKey + '<')
+    const end = endKey === null ? html.indexOf('</details>', start) : html.indexOf('>' + endKey + '<')
+    return start >= 0 && end > start ? html.slice(start, end) : ''
+  }
+  const groups = {
+    recognition: sliceOf('secRecognition', 'secInteraction'),
+    interaction: sliceOf('secInteraction', 'secText'),
+    text: sliceOf('secText', 'secSynthesis'),
+    synthesis: sliceOf('secSynthesis', 'secModels'),
+    models: sliceOf('secModels', 'secAdvanced'),
+    advanced: sliceOf('secAdvanced', null),
+  }
+  const has = (group, key) => groups[group].includes('>' + key + '<')
+
+  check('识别组含：模型/语言/实时字',
+    has('recognition', 'model') && has('recognition', 'language') && has('recognition', 'liveAsr'))
+  check('识别组不含交互项',
+    !has('recognition', 'mode') && !has('recognition', 'autoSend') && !has('recognition', 'shortcut'))
+  check('交互组含：模式/静音/自动发送/发送前等待/快捷键',
+    has('interaction', 'mode') && has('interaction', 'silenceMs') && has('interaction', 'autoSend')
+    && has('interaction', 'autoSendExtraMs') && has('interaction', 'shortcut'))
+  check('文本组含：清理语气词/词表',
+    has('text', 'removeFillers') && has('text', 'words'))
+  check('合成组含：朗读/追赶/引擎/语速/音调/当前合成方式',
+    has('synthesis', 'readAloud') && has('synthesis', 'readAloudLag') && has('synthesis', 'ttsEngine')
+    && has('synthesis', 'rate') && has('synthesis', 'pitch')
+    && groups.synthesis.includes('ttsCurrent'))
+  check('合成组含引擎参数（音量/格式）',
+    has('synthesis', 'volume') && has('synthesis', 'ttsFormat'))
+  check('模型组含：预加载/空闲释放/环境自检/模型列表',
+    has('models', 'preloadModels') && has('models', 'idleReleaseMinutes')
+    && has('models', 'envCheck') && groups.models.includes('modelGroupAsr'))
+  check('模型组不再包含「当前合成方式」', !groups.models.includes('ttsCurrent'))
+  check('高级组含诊断/调试说明', has('advanced', 'advancedDiagnostics') && has('advanced', 'advancedDebug'))
+  check('高级组没有可配置控件',
+    !groups.advanced.includes('<input') && !groups.advanced.includes('<select')
+    && !groups.advanced.includes('<textarea') && !groups.advanced.includes('<button'))
+
+  // 6 组都用原生 details 折叠；只有高级组默认收起
+  const detailsTags = html.match(/<details[^>]*>/g) || []
+  check('6 个分组都可折叠（details）', detailsTags.length === 6, String(detailsTags.length))
+  check('高级组默认收起、其余展开',
+    detailsTags.length === 6
+    && detailsTags.slice(0, 5).every((tag) => /\bopen\b/.test(tag))
+    && !/\bopen\b/.test(detailsTags[5]))
+  check('高级组有 summary 标题与说明',
+    html.includes('<summary') && html.includes('>secAdvancedHint<'))
+
+  // 紧凑布局：短字段并排行使用 grid auto-fit
+  check('存在并排短字段行（grid auto-fit ≥3 处）',
+    (html.match(/minmax\(220px, 1fr\)/g) || []).length >= 3,
+    String((html.match(/minmax\(220px, 1fr\)/g) || []).length))
 }
 
 // ── 7. 模型可选性 ─────────────────────────────────────
