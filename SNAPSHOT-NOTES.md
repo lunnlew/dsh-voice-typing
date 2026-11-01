@@ -1,6 +1,6 @@
 # dsh-voice-typing 代码快照说明
 
-版本：0.0.2 　生成时间：2026-11-01 19:05（追赶策略定稿：7.5s 预算 / 保留最新 3 段 / 生成快时首句 skim / 高亮裁剪到视口）
+版本：0.0.2 　生成时间：2026-11-01 19:45（测试精简：磁盘 52→38 个测试文件、npm test 从 51→37 项、211s→29s）
 
 ## 文件结构
 
@@ -18,7 +18,7 @@
 | `lib/text-rules.js` | 文本规则：词表解析与替换、语气词清理、输出规范化 |
 | `lib/turn-model.js` | 回合判定模型（`createTurnModel` 工厂）：判定新一轮、分配 turnId、句子序号、空闲清理 |
 | `lib/sse-envelope.js` | SSE 事件信封协议层：`EVENT_PROTOCOL_VERSION`、全局事件序号、`buildEventEnvelope` |
-| `lib/speech-clean.js` | 文本清洗与分句：`stripForSpeech`（Markdown → 纯文本）、`splitSentenceParts`、`findSentenceBreak` |
+| `lib/speech-clean.js` | 文本清洗与分句：`stripForSpeech`（Markdown → 纯文本）、`splitSentenceParts` |
 | `lib/read-aloud-policy.js` | **朗读切句/发射规则**（纯函数）：`splitLongText`（完整句子切分，绝不断成半句）、`packWindowSentences`（相邻短句合成 ≤ 上限的片段）、`MAX_SENTENCE_CHARS`；`EMIT_WINDOW_MS` 仅用于「收不到 ack 的老客户端」降级节奏 |
 | `lib/paragraph.js` | **自然段落切分**（纯函数）：空行 / 列表项 / 标题 / 引用为段落边界；`splitParagraphs` 支持流式累积（末尾未完成段进 `rest`） |
 | `lib/read-aloud-scheduler.js` | **朗读调度器**：按自然段落收集、按客户端 ack 的播放进度发句（流控）；追赶最新（超预算整段跳旧段、保留最新 3 段）；生成很快时 skim（每段只读首句）；无 ack 时降级为旧的 400ms 时间窗口节奏 |
@@ -259,7 +259,7 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
   - `lib/sse-envelope.js`：`EVENT_PROTOCOL_VERSION`、全局事件序号、
     `buildEventEnvelope` 从宿主迁出，宿主 re-export（对外接口不变）。
   - `lib/speech-clean.js`：`stripForSpeech`、`splitSentenceParts`、
-    `findSentenceBreak` 从宿主迁出（纯函数，宿主流式循环改用它们）。
+    `splitSentenceParts` / `splitLongText` 等纯函数迁出，宿主流式循环直接复用。
 
 ### 7.7 朗读无声根因：播放上下文卡在 suspended（实测定位）
 实测 `GET /diagnostics` 时客户端报告 `speaking: true`（卡住）但**没有声音**，
@@ -292,7 +292,8 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
 - 8 秒还挂起才算彻底失败（自动播放被完全禁止），跳过这一句并
   `playSkippedRef += 1`；调试快照 `__DSH_VOICE_DEBUG__().playSkipped` 可查。
   只记 `ttsFailures` 会漏掉它——那句的**合成是成功的**，是播放被跳过了。
-- 回归测试 `test/read-aloud-resume.test.mjs`：真的跑新旧两套恢复逻辑，
+- 回归测试：真实 `play()` 的 resume/gen 复查由仓库外 `review/client-harness.mjs` 行为验证；
+  仓库内原 `read-aloud-resume.test.mjs` 测的是复制逻辑（已删）。
   断言「resume 要 2 秒时旧逻辑丢句、新逻辑照样播」，并断言失败时最多等约 8 秒。
 
 #### 7.7.2 教训：改完 `src/client/` 必须重新 bundle
@@ -363,7 +364,7 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
   （用户第二次反馈：滚动到输入框下方，高亮显示在输入框上）；
   回归 `test/highlight-overlay.test.mjs`；
 - 回归：`test/read-aloud-scheduler.test.mjs`（纯逻辑）、`test/read-aloud-chain.test.mjs`
-  （真实钩子 + 模拟客户端 ack 的端到端）、`test/read-aloud-emit-rate.test.mjs`（无 ack 降级）。
+  （真实钩子 + 模拟客户端 ack 的端到端）、`test/read-aloud-catchup.test.mjs`（含 pending 收尾时限）。
 
 ### 8. 聆听与朗读是两个独立的事
 
@@ -381,6 +382,8 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
 （LLM 响应够快时，刚入队的第一句就被清掉 → 这一轮一句都读不出来）。
 
 朗读按钮只在**正在朗读时**出现，不占地方也不会误点。
+
+> 真实模型的慢集成（SenseVoice 预加载等）：`DSH_VT_SLOW_TESTS=1 npm test`；默认套件走快速路径并显式跳过。
 
 ## 已知限制
 
@@ -405,7 +408,7 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
 ## 回归测试
 
 ```bash
-npm test             # 51 个测试文件（不连宿主）
+npm test             # 37 个测试文件（不连宿主；先跑 bundle-sync）
 npm run build:client # 把 src/client/pure/ 内联进 lib/client.js
 npm run check:client # 只校验产物是否最新（CI 用）
 npm run test:silence -- http://127.0.0.1:<端口>   # 静音与流式识别回归（需要宿主在运行）
@@ -414,6 +417,6 @@ npm run test:silence -- http://127.0.0.1:<端口>   # 静音与流式识别回�
 `npm test` 里有一部分是「静态正则匹配源码」的断言，
 它们能挡住回归，但重构时会误报或漏报；
 涉及行为的断言会**从源码里提取纯函数出来求值**再跑场景
-（见 `test/draft-merge.test.mjs`、`test/stream-gate.test.mjs`）。
+（见 `test/draft-merge.test.mjs`、`test/gate-host.test.mjs`）。
 
 行为正确性仍以实测为准。

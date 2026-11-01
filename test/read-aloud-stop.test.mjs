@@ -41,7 +41,6 @@ const { apply } = await import('../lib/index.js')
 const { trimBacklog } = await import('../src/client/pure/backlog.js')
 const cli = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
 const host = fs.readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
-const turnModelSrc = fs.readFileSync(new URL('../lib/turn-model.js', import.meta.url), 'utf8')
 
 let passed = 0
 let failed = 0
@@ -188,30 +187,24 @@ console.log('\n轮次判定：新一轮才广播新的 turn-begin，且轮次 id
       turnEnds.length === 1 && turnEnds[0].data.turnId === begins[0].data.turnId,
       `广播了 ${turnEnds.length} 次：${turnEnds.map((e) => e.data.turnId).join(',')}（应为第一轮 ${begins[0]?.data?.turnId}）`)
 
-    // 旧 turn-end（一次调用结束）不应再以 turn-end 名义出现。
-    check('不再把「一次调用结束」命名为 turn-end', true)
+    // 旧 turn-end（一次调用结束）不应再以 turn-end 名义出现：
+    // 两次调用 = 两条 call-end；turn-end 只表示「真正一轮结束」，
+    // 只应在下一轮开始时为**上一轮**广播一条。
+    check('一次调用结束只发 call-end，不冒充 turn-end',
+      callEnds.length === 2
+      && turnEnds.length === 1
+      && turnEnds.every((e) => e.data.turnId === begins[0].data.turnId),
+      `callEnds=${callEnds.length} turnEnds=${turnEnds.map((e) => e.data.turnId).join(',')}`)
   } finally {
     sse.close()
   }
 }
 
-console.log('\n轮次判定：不能靠「距上次超过 5 秒」的窗口')
-{
-  const h = makeHost({ readAloud: true, preloadModels: false })
-  h.sessions.set('s3', { deriveMessages: () => [{ role: 'user', id: 'u1' }] })
-  const sse = connectSse(h)
-  try {
-    // 同一轮、同一条数，但两次调用之间隔了 6 秒 ——
-    // 模拟「工具调用跑了很久」。旧的时间窗逻辑会把第二轮误判成新一轮。
-    await runStream(h, { sessionId: 's3', messages: requestWith(1) }, ['工具调用前。'])
-    await new Promise((r) => setTimeout(r, 6100))
-    await runStream(h, { sessionId: 's3', messages: requestWith(1) }, ['工具调用后。'])
-    const begins = sse.events().filter((e) => e.event === 'turn-begin')
-    check('隔了 6 秒也不该多广播 turn-begin', begins.length === 1, `广播了 ${begins.length} 次`)
-  } finally {
-    sse.close()
-  }
-}
+// 注：「session 条数 + TURN_WINDOW_MS(5000) 时间窗」兜底路径当前**没有测试**。
+// 原因：lib/turn-model.js 的 isNewUserTurn 不注入 now（只有 prune 可注入），
+// 真实覆盖必须真的等 5 秒。旧版本这里有一个 6.1s 的用例，但它走的是
+// requestUserCount 路径、与时间窗无关，且与上面的「同一轮两次调用」重复 ——
+// 属于假慢 + 重复，已删除。
 
 // ---------------------------------------------------------------------------
 // 2) 客户端：停止朗读必须真的切断声音
@@ -253,17 +246,11 @@ check('状态行有宽度下限，换状态时不挪位置',
   /minWidth: 48/.test(cli))
 
 console.log('\n客户端：状态行只放短词，长说明走悬停提示')
-for (const [key, short] of [
-  ['modelLoading', '加载模型…'],
-  ['modelFailed', '模型加载失败'],
-  ['micFailed', '麦克风打不开'],
-  ['micDenied', '麦克风被拒'],
-  ['micUnsupported', '不支持录音'],
-  ['empty', '没听清'],
-  ['recognizeFailed', '识别失败'],
-]) {
-  check(`「${key}」是短词`, new RegExp(`${key}: '${short}'`).test(cli))
-  check(`「${key}」有对应的长说明`, new RegExp(`${key}Detail: '`).test(cli))
+// 抽查两个有代表性的 key（状态行显示 / 朗读失败提示），
+// 其余 key 的存在性只是文案冒烟，不值得逐条占断言（审计结论：14 条 → 2 条）。
+for (const [key, short] of [['modelLoading', '加载模型…'], ['ttsFailed', '朗读失败']]) {
+  check(`「${key}」是短词且有对应的长说明`,
+    new RegExp(`${key}: '${short}'`).test(cli) && new RegExp(`${key}Detail: '`).test(cli))
 }
 check('长说明挂到状态文字的 title 上',
   /title: singleDetail \|\| undefined/.test(cli))
@@ -505,23 +492,10 @@ check('不再用 loaded 标志整份丢弃结果', !/if \(configStore\.loaded\) 
 check('拉取失败会重试', /config-retry/.test(cli))
 check('开麦时再对一次配置', /if \(!on\) return undefined\s*\n\s*void syncConfig\(\)/.test(cli))
 
-console.log('\n宿主：用请求里的用户消息条数判轮次')
-check('回合判定抽到独立模块 turn-model.js',
-  /function countRequestUserMessages/.test(turnModelSrc) && /function detectTurn/.test(turnModelSrc),
-  '宿主 index.js 的回合判定应隔离到 lib/turn-model.js')
-check('宿主委托给 turnModel', /turnModel\.countRequestUserMessages\(options\)/.test(host)
-  && /turnModel\.detectTurn\(sessionId, requestUserCount\)/.test(host),
-  'index.js 不该再内联 countRequestUserMessages/detectTurn，应委托 turnModel')
-check('数请求里的用户消息', /function countRequestUserMessages/.test(turnModelSrc))
-check('请求里的条数优先', /if \(requestUserCount >= 0\)/.test(turnModelSrc))
-check('轮次 id 用递增序号（不再用内容锚点）',
-  /const turnId = `turn-\$\{\+\+turnCounter\}`/.test(turnModelSrc),
-  '锚点在本轮用户消息还没写进 session 时会指着上一轮那条 —— 两轮会共用同一个 id')
-// 回归：条数「减小」不能误判新一轮（上下文裁剪/截断会让条数变小）。
-// 只认「增加」为新回合；减小视为同轮/异常，不打断正在朗读的内容。
-check('只认条数「增加」才是新一轮（减小=裁剪，不打断）',
-  /return requestUserCount > prev/.test(turnModelSrc),
-  '用 !== 会在 DSH 压缩历史/删旧 user 消息时误清客户端队列、撤销用户刚点的停止')
+console.log('\n宿主：next() 同步抛错必须复位 busy（独有回归）')
+// 其余「回合判定抽到 turn-model / 只认条数增加 / turnId 递增序号」的形状断言
+// 与 test/turn-boundary.test.mjs 重复（那边对 lib/turn-model.js 断言同样内容），
+// 已删（审计结论）；这里只保留 turn-boundary 没覆盖的 busy 复位回归。
 // 回归：next() 同步抛错（模型/连接错误）必须复位 busy。
 // 否则 busySession 卡 true → 客户端 assistantRunning 恒真 → 自动发送链路永久失效。
 {

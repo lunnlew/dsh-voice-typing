@@ -8,11 +8,13 @@
  * 这个测试保证：
  *   1. 产物与源文件同步（改了 src 忘了 bundle → CI 报错）；
  *   2. 每个源文件只被内联一次（重复内联会导致函数重复定义）；
- *   3. 产物里没有残留的 bundle 标记（说明忘了跑脚本）。
+ *   3. 产物里没有残留的 bundle 标记（说明忘了跑脚本）；
+ *   4. 生成逻辑**幂等**且**没有写副作用**（通过 import `renderBundle()` 只计算，
+ *      不再像旧版那样直接重跑脚本覆盖 lib/client.js）。
  */
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { execFileSync } from 'node:child_process'
+import { renderBundle } from '../scripts/bundle-client.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const bundled = fs.readFileSync(root + '/lib/client.js', 'utf8')
@@ -25,12 +27,16 @@ function check(name, ok, detail) {
 }
 
 console.log('产物与源文件同步')
-try {
-  execFileSync('node', [root + '/scripts/bundle-client.mjs', '--check'], { stdio: 'pipe' })
-  check('lib/client.js 已是最新（--check 通过）', true)
-} catch (e) {
-  check('lib/client.js 已是最新（--check 通过）', false,
+{
+  const rendered = renderBundle()
+  check('lib/client.js 与 src/client/ 一致（等价于 --check，但不写盘）',
+    rendered.out === bundled,
     '改了 src/client/ 之后要跑 node scripts/bundle-client.mjs')
+  // 幂等：同样的输入算两次必须完全一样（保证生成逻辑没有隐藏状态）。
+  const again = renderBundle()
+  check('生成逻辑幂等（两次计算结果一致）', again.out === rendered.out)
+  check('内联了纯函数源文件（不是空内联）', rendered.used.size > 0,
+    '没匹配到任何 @bundle 标记 —— 产物会「看着正常但没有内联」')
 }
 
 console.log('\n产物结构')
@@ -50,21 +56,10 @@ console.log('\n源码与产物分离（bundle 必须可重复运行）')
   check('每个源文件只有一个标记（两个标记会把纯函数内联两次）',
     markers.length === [...new Set(markers)].length,
     `${markers.length} 个标记 / ${[...new Set(markers)].length} 个源文件`)
-  check('产物里每个纯函数恰好定义一次', (() => {
-    for (const fn of ['advanceGate', 'mergeDraft', 'syncUserEdit', 'parseEnvelope',
-      'belongsToSession', 'createTimerRegistry', 'sleep']) {
-      const c = (bundled.match(new RegExp('function ' + fn + '\\b', 'g')) || []).length
-      if (c !== 1) return false
-    }
-    return true
-  })())
-  // 跑两次，产物必须不变（幂等）
-  const before = bundled
-  execFileSync('node', [root + '/scripts/bundle-client.mjs'], { stdio: 'pipe' })
-  const after = fs.readFileSync(root + '/lib/client.js', 'utf8')
-  check('bundle 脚本可重复运行（幂等）', before === after)
 }
-for (const [fn, file] of [
+
+/** 纯函数模块 → 该模块里必须恰好定义一次的函数。 */
+const PURE_DEFINITIONS = [
   ['advanceGate', 'pure/gate.js'],
   ['mergeDraft', 'pure/draft.js'],
   ['syncUserEdit', 'pure/draft.js'],
@@ -72,17 +67,20 @@ for (const [fn, file] of [
   ['belongsToSession', 'pure/envelope.js'],
   ['createTimerRegistry', 'pure/envelope.js'],
   ['sleep', 'pure/envelope.js'],
+  ['trimBacklog', 'pure/backlog.js'],
   ['unescapeSpeechText', 'pure/highlight.js'],
   ['normalizeRun', 'pure/highlight.js'],
   ['collapseWhitespace', 'pure/highlight.js'],
   ['matchInNodes', 'pure/highlight.js'],
-]) {
+]
+for (const [fn, file] of PURE_DEFINITIONS) {
   const count = (bundled.match(new RegExp(`function ${fn}\\b`, 'g')) || []).length
   check(`${fn} 在产物里恰好定义一次（来自 ${file}）`, count === 1, `实际 ${count} 处`)
 }
 
 console.log('\n源文件是纯的（能在 Node 里原生 import）')
-for (const f of ['pure/gate.js', 'pure/draft.js', 'pure/envelope.js', 'pure/highlight.js']) {
+const PURE_FILES = ['pure/gate.js', 'pure/draft.js', 'pure/envelope.js', 'pure/backlog.js', 'pure/highlight.js']
+for (const f of PURE_FILES) {
   const raw = fs.readFileSync(`${root}/src/client/${f}`, 'utf8')
   // 剥离注释后再检查 —— 注释里提到 window 是正常的
   const code = raw

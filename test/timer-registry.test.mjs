@@ -12,6 +12,13 @@
  *   源码里**不允许**出现裸的 window.setTimeout / window.setInterval
  *   —— 只有定时器登记表内部和 sleep() 里可以有。
  *   这样「漏登记」会直接被静态检查抓到，而不是等到用户踩到。
+ *
+ * 本文件已并入原 test/timer-pairs.test.mjs 的三组不变量：
+ *   清理调用的变量必须存在 / 登记表调用必须带字符串 id /
+ *   识别路径的变量作用域（keptPartial、自动发送可达）。
+ *   注意：原 timer-pairs 的「变量存在」检查是个**假绿**（把
+ *   `hintTimerRef.current` 归一成 `current`，恰好撞上源码里无关的
+ *   `const current = ...` 就永远通过）。这里改成按 ref 根名核对声明。
  */
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -71,6 +78,57 @@ check('暴露了 __DSH_VOICE_DEBUG__', /window\.__DSH_VOICE_DEBUG__ = \(\) =>/.t
 check('快照里能看到朗读队列长度', /queue: speakQueueRef\.current\.length/.test(src))
 check('快照里能看到还挂着哪些定时器', /timers: timers\.ids\(\)/.test(src))
 check('卸载时删除快照', /delete window\.__DSH_VOICE_DEBUG__/.test(src))
+
+/* ------------------------------------------------------------------ */
+/* 以下由原 test/timer-pairs.test.mjs 合并而来（独有不变量，不放丢）   */
+/* ------------------------------------------------------------------ */
+// 只剥注释、不剥字符串 —— 要检查「定时器 id / 清理解释表达式」的原文。
+const code = src
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^\s*\/\/.*$/gm, '')
+
+console.log('\n清理调用用的变量必须存在（按 ref 根名核对）')
+const clears = [...code.matchAll(/window\.clear(?:Timeout|Interval)\(([^)]+)\)/g)]
+check('有清理调用', clears.length > 0)
+for (const m of clears) {
+  const expr = m[1].trim()
+  const root = expr.split('.')[0].trim()
+  // 关键：不能用 expr.replace(/^ref\./,'') 之类归一化成 "current" ——
+  // 源码里恰好有无关的 `const current = ...`，会让检查永远为真（原假绿）。
+  const declared = new RegExp(`const\\s+${root}\\s*=\\s*useRef\\(`).test(code)
+    || new RegExp(`(?:const|let|var)\\s+${root}\\b`).test(code)
+  check(`清理的 ${expr} 有定义（${root} 已声明）`, declared,
+    '变量不存在 → 每次都抛 ReferenceError → 这段逻辑等于没有')
+}
+
+console.log('\n登记表的调用必须带 id')
+for (const m of code.matchAll(/timers\.(timeout|interval)\(\s*([^,)]+)/g)) {
+  const id = m[2].trim()
+  check(`timers.${m[1]} 的 id 是字符串字面量`, /^['"][^'"]+['"]$/.test(id), id)
+}
+
+console.log('\n关键不变量：识别路径上的变量作用域')
+{
+  // keptPartial 必须在 try 之前取，否则 catch 里拿不到
+  const idx = code.indexOf('const keptPartial = livePartialRef.current')
+  const tryIdx = code.indexOf('try {', code.indexOf('const transcribeSegment'))
+  check('keptPartial 在 try 之前取', idx >= 0 && tryIdx >= 0 && idx < tryIdx,
+    '定义在 try 块内部的话，catch 里会抛 ReferenceError')
+  // catch 里用得到它
+  const catchIdx = code.indexOf('catch (error)', tryIdx)
+  const useIdx = code.indexOf('keptPartial', catchIdx)
+  check('catch 分支能拿到 keptPartial', useIdx > catchIdx)
+}
+
+console.log('\n识别结束后的「自动发送」逻辑必须能走到')
+{
+  const t = code.indexOf('const transcribeSegment')
+  const autoSend = code.indexOf("configRef.current.autoSend !== false", t)
+  const catchIdx = code.indexOf('catch (error)', t)
+  check('自动发送的判断在 catch 之前（异常时也能走）', autoSend > 0 && autoSend < catchIdx,
+    '放在 catch 之后的话，识别失败就永远不发送')
+  check('自动发送会调用 submit', /inputActions\?\.submit\?\.\(\)/.test(code.slice(t, catchIdx + 2000)))
+}
 
 console.log(`\n通过 ${passed}，失败 ${failed}`)
 process.exitCode = failed ? 1 : 0

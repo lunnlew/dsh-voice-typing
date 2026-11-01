@@ -441,7 +441,7 @@ Silero VAD 切段（灵敏度 0.5 / 最短语音 0.25 s / 静音断句 0.5 s / �
 | `lib/text-rules.js` | 词表解析、替换、语气词清理、输出规范化 |
 | `lib/read-aloud-policy.js` | **朗读发射规则**（纯函数）：时间窗口、单句上限、`splitLongText`（切成完整句子，绝不断成半句）、`packWindowSentences`（一批取几句，不合并成长文本） |
 | `lib/paragraph.js` | **自然段落切分**（纯函数）：空行 / 列表项 / 标题 / 引用为段落边界，`splitParagraphs` 支持流式累积（末尾未完成段进 `rest`） |
-| `lib/speech-clean.js` | 文本清洗与分句（纯函数）：`stripForSpeech`（Markdown → 纯文本 + SSML 转义）、`splitSentenceParts`、`findSentenceBreak` |
+| `lib/speech-clean.js` | 文本清洗与分句（纯函数）：`stripForSpeech`（Markdown → 纯文本 + SSML 转义）、`splitSentenceParts` |
 | `lib/read-aloud-scheduler.js` | **朗读调度器**：按自然段落收集、按客户端 ack 的播放进度发句（流控），无 ack 时降级为时间窗口；事件带 `para` / `paraStart` |
 | `lib/fence-filter.js` | **流式代码围栏过滤器**（纯函数）：跨 chunk 识别 ``` / ~~~ 围栏（围栏标记本身可能被 chunk 边界切开），围栏内内容一个字都不交给朗读 |
 | `lib/tts-env.js` | 运行环境自检 |
@@ -565,7 +565,7 @@ Silero VAD 切段（灵敏度 0.5 / 最短语音 0.25 s / 静音断句 0.5 s / �
 - 判断「该不该丢连接」必须走**同一个判据** `isBrokenConnection()`，不要四处各写正则。
 - 它的正则必须包含「没有收到音频数据 / 超时」。只判 WebSocket 字面错误必然漏。
 - `chunks.length === 0` 那条分支要**自己调 `disposeTts()` 再抛错**，别指望外层 catch。
-- 回归测试 `test/tts-reconnect.test.mjs`：用假合成器模拟「坏连接返回空音频」，
+- 回归测试 `test/edge-tts.test.mjs`（合并了原 tts-pending/reconnect/lock-hardtimeout）：用假合成器模拟「坏连接返回空音频」，
   断言第二次调用会**重建实例并成功**。
 - 改完要**重启 DSH**（`lib/edge-tts.js` 是宿主侧模块）。
 
@@ -584,7 +584,8 @@ Silero VAD 切段（灵敏度 0.5 / 最短语音 0.25 s / 静音断句 0.5 s / �
   最多等 8 秒。
 - 8 秒还挂起才算彻底失败，这时跳过这一句并 `playSkippedRef += 1`，
   调试快照 `__DSH_VOICE_DEBUG__().playSkipped` 能查到。
-- 回归测试：`test/read-aloud-resume.test.mjs` 真的跑两种恢复逻辑。
+- 回归测试：真实 `play()` 的 resume/gen 复查用仓库外 `review/client-harness.mjs` 做行为验证；
+  仓库内原 `read-aloud-resume.test.mjs` 测的是复制出来的逻辑（已与真实实现漂移），已删除。
 
 #### 朗读队列：代次机制
 
@@ -662,7 +663,7 @@ Silero VAD 切段（灵敏度 0.5 / 最短语音 0.25 s / 静音断句 0.5 s / �
 回归：`test/read-aloud-scheduler.test.mjs`（调度器纯逻辑：流控/追赶/保留 3 段/skim/watchdog/重连）、
 `test/read-aloud-catchup.test.mjs`（真实钩子 + 真实 ack 的追赶端到端）、
 `test/reading-ack-contract.test.mjs`（ack 契约/边界）、
-`test/read-aloud-emit-rate.test.mjs`（无 ack 降级路径）、端到端 `test/read-aloud-chain.test.mjs`。
+`test/read-aloud-catchup.test.mjs` 的 e2（pending 收尾时限）、端到端 `test/read-aloud-chain.test.mjs`。
 
 #### 客户端安全网：按整段裁剪（不承担「追最新」职责）
 
@@ -777,8 +778,10 @@ Silero VAD 切段（灵敏度 0.5 / 最短语音 0.25 s / 静音断句 0.5 s / �
 
 #### 改动之后
 
-- `npm test` 必须全绿（40 个文件）。
+- `npm test` 必须全绿（37 个文件；会先跑 `bundle-sync` 校验产物同步）。
 - 需要连活插件的集成测试单独跑：`npm run test:silence -- http://127.0.0.1:<端口>`。
+- 需要跑「真加载模型」的慢集成（SenseVoice 预加载等）：`$env:DSH_VT_SLOW_TESTS=1; npm test`。
+  默认套件走快速路径并显式打印 ⏭ 跳过，不会悄悄漏测。
 - 改完 `lib/index.js`（宿主侧）要**重启 DSH**；
   改完 `lib/client.js`（浏览器侧）要**浏览器强制刷新**。
 - 改完 `src/client/pure/` 要跑 **`npm run build:client`** 重新生成 `lib/client.js`。

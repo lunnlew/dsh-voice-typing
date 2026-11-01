@@ -17,7 +17,9 @@
  *      保留最新 3 段，等尾部成段后读到最新段；
  *   c. 关闭追赶（`readAloudLag: 0`）：同样的输入必须整段顺序全部读出（对照组）。
  *   d/e. 调用结束的收尾契约：关闭追赶时**同步排空**（老客户端不额外等待）；
- *      开启追赶时先等 ack grace（给新客户端发首条 ack 的机会）再排空、不丢尾巴。
+ *      开启追赶时先等 ack grace（给新客户端发首条 ack 的机会）再排空、不丢尾巴；
+ *      e2（由已删除的 test/read-aloud-emit-rate.test.mjs 迁移）：一次性大批灌入时
+ *      收尾**有时限** —— 不会退化成「按 400ms 窗口一条条慢慢拖到最后」。
  *   f. SSE 重连（页面刷新）：旧连接遗留的「已发未确认」必须被释放，
  *      新连接的首句不能等 10s 的 ack watchdog。
  *
@@ -589,6 +591,46 @@ async function scenarioFlushContract() {
       const expected = expectedParagraphs(text)
       const { problems } = checkParagraphContract(sentenceEvents(sse, from), expected, { allowSkip: false })
       check('e4 grace 排空后内容完整、顺序正确、每段从段首开始',
+        problems.length === 0, JSON.stringify(problems.slice(0, 3)))
+    } finally {
+      sse.close()
+    }
+  }
+
+  // e2) pending 收尾必须「有时限」：老客户端（无 ack）一次灌入一大批文本时，
+  //     调用结束的收尾不能退化成「按 400ms 窗口一条条慢慢拖」。
+  //     （由已删除的 test/read-aloud-emit-rate.test.mjs 迁移 —— 那条独有断言：
+  //      「一次性灌入时最后一条在 3s 内到齐，不会按窗口拖 ~8s」。）
+  scenario('e2) 开启追赶 + 无 ack + 一次性大批灌入：收尾有时限（不按窗口拖）')
+  {
+    const ctx = openSession({
+      sessionId: 'catchup-e2',
+      rowConfig: { readAloud: true, preloadModels: false, readAloudLag: 2 },
+    })
+    const { sse, from, ctl } = ctx
+    try {
+      // 12 个短段（每段 1 句）：pendingMs ≈ 12×700ms = 8400ms > 2000ms 预算 → grace 路径。
+      // 若退化成「按 400ms 窗口逐条补发」，收尾剩余 11 条要 4400ms > 3000ms 上限。
+      const paras = []
+      for (let i = 0; i < 12; i += 1) paras.push('段' + i + '。')
+      const text = paras.map((p) => p + '\n\n').join('')
+      ctl.push(text)
+      await waitFor(() => sentenceEvents(sse, from).length >= 1, { timeoutMs: 1000 })
+      ctl.close()
+      const streamErr = await ctx.done
+      const endAt = Date.now()
+      const allInTime = await waitFor(
+        () => sentenceEvents(sse, from).length >= 12,
+        { timeoutMs: 3000 },
+      )
+      const elapsed = Date.now() - endAt
+      check('e2a 流正常结束', streamErr === null, String(streamErr))
+      check('e2b 收尾有时限：12 条在 3s 内到齐（按 400ms 窗口拖要 ~4.4s）',
+        allInTime && elapsed <= 3000,
+        `elapsed=${elapsed}ms events=${sentenceEvents(sse, from).length}`)
+      const expected = expectedParagraphs(text)
+      const { problems } = checkParagraphContract(sentenceEvents(sse, from), expected, { allowSkip: false })
+      check('e2c 收尾内容完整、顺序正确、每段从段首开始',
         problems.length === 0, JSON.stringify(problems.slice(0, 3)))
     } finally {
       sse.close()

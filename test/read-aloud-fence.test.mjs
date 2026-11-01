@@ -8,7 +8,32 @@ await mkdir(tmpHome, { recursive: true })
 process.env.DSH_HOME = tmpHome
 
 const { apply } = await import('../lib/index.js')
-const { EMIT_WINDOW_MS } = await import('../lib/read-aloud-policy.js')
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * 轮询等待「sentence 事件计数进入静默期」。
+ *
+ * 为什么不再固定 sleep：`pending` 模式下流结束的 finally 会调用 reader.end()，
+ * 把剩余句子**同步**发完并清掉窗口定时器 —— 固定等 7.1s 纯属浪费。
+ * 但窗口定时器可能在流结束前已经发过几句，所以等「计数一段时间不再变化」。
+ *
+ * @param {() => number} count 返回已捕获的 sentence 事件数。
+ * @param {{timeout?: number, quietMs?: number}} [opts]
+ * @returns {Promise<number>} 静默期开始时的计数。
+ */
+async function waitForQuiet(count, { timeout = 1500, quietMs = 80 } = {}) {
+  const deadline = Date.now() + timeout
+  let last = count()
+  let lastChange = Date.now()
+  while (Date.now() < deadline) {
+    await sleep(10)
+    const now = count()
+    if (now !== last) { last = now; lastChange = Date.now(); continue }
+    if (now > 0 && Date.now() - lastChange >= quietMs) return now
+  }
+  return count()
+}
 
 // 只 apply 一次，所有用例共用同一套路由与 SSE 订阅。
 const routes = new Map()
@@ -57,7 +82,8 @@ async function run(chunks) {
     })(),
   )
   for await (const _ of stream) { /* consume */ }
-  await new Promise((r) => setTimeout(r, EMIT_WINDOW_MS * 14 + 1500))
+  // 流结束：finally 里 reader.end() 已同步发完剩余句子；这里只等事件计数静默。
+  await waitForQuiet(() => events.filter((e) => e.event === 'sentence').length)
   return events
     .slice(before)
     .filter((e) => e.event === 'sentence')

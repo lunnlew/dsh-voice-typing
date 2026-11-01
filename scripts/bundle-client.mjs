@@ -18,6 +18,10 @@
  * 用法：
  *   node scripts/bundle-client.mjs          # 生成
  *   node scripts/bundle-client.mjs --check  # 只校验产物是否最新（CI 用）
+ *
+ * 也可以被 import（测试用）：`renderBundle()` 只计算不写盘，
+ * 于是测试可以在**不改产物**的前提下校验「产物与源一致 + 计算幂等」，
+ * 避免测试本身产生写副作用（旧版测试会直接重跑生成脚本覆盖 lib/client.js）。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -79,7 +83,26 @@ function bundle() {
   return { original, out, used }
 }
 
-const { original, out, used } = bundle()
+/**
+ * 计算产物内容（不写盘）。测试用：可以在不改 `lib/client.js` 的前提下校验
+ * 「产物与 src 一致」以及「重复计算结果不变（幂等）」，避免测试产生写副作用。
+ * @returns {{ original: string, out: string, used: Set<string> }}
+ */
+export function renderBundle() {
+  return bundle()
+}
+
+/** 当前模块是否作为 CLI 直接运行（被 import 时不执行写盘）。 */
+const isMain = (() => {
+  try {
+    return path.resolve(process.argv[1] ?? '') === path.resolve(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+})()
+
+if (isMain) {
+  const { original, out, used } = bundle()
 
 // 一个标记都没匹配到 → 产物里没有内联任何东西。
 // 这不是错误（还没加标记时是正常状态），但必须**说出来**，
@@ -105,3 +128,4 @@ if (process.argv.includes('--check')) {
 await writeFileAtomic(target, out, { encoding: 'utf8' })
 console.log(`✓ 已生成 lib/client.js（内联 ${used.size} 个源文件：${[...used].join(', ')}）`)
 console.log(`  ${original.length} → ${out.length} 字节`)
+}

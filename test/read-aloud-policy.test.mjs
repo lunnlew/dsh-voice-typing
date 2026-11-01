@@ -1,23 +1,24 @@
 /**
- * 朗读发射规则：时间窗口 + 单句上限 + 一批段数上限。
+ * 朗读切分/发射规则（纯函数）。
  *
- * 背景（用户反馈）：
- *   「可能会接收一大批的文本，导致发生了一大批的 TTS 请求」
- *   —— 以前每遇到一个句末标点就广播一条 sentence，客户端立刻发一个 /tts。
- *   一大段回复会瞬间打出几十个请求；在线合成又是串行的，后面的句子要排很久。
+ * 生产现状（0.0.2）：
+ *   - 发句节奏由 `lib/read-aloud-scheduler.js` 按**客户端播放进度（ack）**驱动，
+ *     旧的「时间窗口每 400ms 取 N 句」只作为**老客户端降级**语义保留；
+ *   - 生产者**不再**按 `MAX_PIECES_PER_WINDOW` 分批（scheduler 显式传
+ *     `maxPieces: 9999`，一次取全再按 ack 流控补发）；
+ *   - `shouldEmit()` 已无生产调用。
  *
- * 需求（用户明确提的两条）：
- *   1. **按时间窗口**取句子发送（不是来一句发一句）；
- *   2. 窗口**不是把所有句子合并成一大段**（文本太多会变成几百字的超长句）。
- *
- * 本测试验证这两条。
+ * 本测试只保护**仍在生产路径上**的规则：
+ *   超长句按句末标点切（`splitLongText`）、碎句合并（`packWindowSentences`）、
+ *   以及「旧窗口分批语义不被重新接回生产」的保护断言。
  */
+import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
   EMIT_WINDOW_MS,
   MIN_SENTENCE_CHARS,
   MAX_SENTENCE_CHARS,
   MAX_PIECES_PER_WINDOW,
-  shouldEmit,
   splitLongText,
   packWindowSentences,
 } from '../lib/read-aloud-policy.js'
@@ -35,35 +36,26 @@ check('单句上限不超过 80 字', MAX_SENTENCE_CHARS <= 80, String(MAX_SENTE
 check('一批最多几句有上限', MAX_PIECES_PER_WINDOW >= 1 && MAX_PIECES_PER_WINDOW <= 4, String(MAX_PIECES_PER_WINDOW))
 check('最短句子长度不超过单句上限', MIN_SENTENCE_CHARS <= MAX_SENTENCE_CHARS)
 
-console.log('\n规则1：窗口里攒了 10 句，一批只发 MAX_PIECES_PER_WINDOW 句，余下的进下一批')
+console.log('\n规则0：旧「窗口分批」语义不能再接回生产（否则本文件的规则 1 才有意义）')
 {
-  const sentences = [
-    '第一句话说的是这件事情。', '第二句话也是同样的意思。', '第三句话继续展开论述。',
-    '第四句话补充一个细节。', '第五句话给出结论。', '第六句话解释原因。',
-    '第七句话举个例子。', '第八句话做对比。', '第九句话总结要点。',
-    '第十句话收尾。',
-  ]
-  const one = packWindowSentences(sentences)
-  check(`一批最多 ${MAX_PIECES_PER_WINDOW} 句`, one.pieces.length <= MAX_PIECES_PER_WINDOW,
-    '实际 ' + one.pieces.length)
-  check('没发完的进了 rest（内容不丢）', one.rest.length > 0, 'rest=' + one.rest.length)
-  check('pieces + rest 总数等于拆段后的总数',
-    one.pieces.length + one.rest.length === sentences.length,
-    `${one.pieces.length}+${one.rest.length} vs ${sentences.length}`)
-
-  // 下一批继续，直到发完
-  let remaining = one.rest
-  let rounds = 1
-  const all = [...one.pieces]
-  while (remaining.length && rounds < 20) {
-    const next = packWindowSentences(remaining)
-    all.push(...next.pieces)
-    remaining = next.rest
-    rounds++
-  }
-  check('多批之后内容全部发出（没有丢句）', remaining.length === 0, '还剩 ' + remaining.length)
-  check('发出的句子总数不变', all.length === sentences.length, `${all.length} vs ${sentences.length}`)
+  const root = fileURLToPath(new URL('..', import.meta.url))
+  const schedulerSrc = fs.readFileSync(root + '/lib/read-aloud-scheduler.js', 'utf8')
+  const indexSrc = fs.readFileSync(root + '/lib/index.js', 'utf8')
+  // 生产唯一调用 packWindowSentences 的地方（scheduler.sentencesOf）显式 maxPieces:9999：
+  // 一次取全，再按客户端 ack 流控逐句补发 —— 不再按窗口分批。
+  check('scheduler 唯一调用方显式 maxPieces: 9999（不再按窗口分批）',
+    (schedulerSrc.match(/packWindowSentences\(/g) || []).length === 1 &&
+    /maxPieces: 9999/.test(schedulerSrc) &&
+    !/MAX_PIECES_PER_WINDOW/.test(schedulerSrc),
+    JSON.stringify({
+      calls: (schedulerSrc.match(/packWindowSentences\(/g) || []).length,
+       has9999: /maxPieces: 9999/.test(schedulerSrc),
+    }))
+  // 宿主不再直接调用旧的发射判定（那些规则已经随窗口发射一起下线）。
+  check('宿主不再调用 shouldEmit / MAX_PIECES_PER_WINDOW',
+    !/shouldEmit\(/.test(indexSrc) && !/MAX_PIECES_PER_WINDOW/.test(indexSrc))
 }
+
 
 console.log('\n规则2：窗口不是「合并成一大段」')
 {
@@ -144,16 +136,6 @@ console.log('\n规则4：碎句合并（「对。」不该各占一次请求）'
   check('两个长句保持分开', two.pieces.length === 2, '段数 ' + two.pieces.length)
 }
 
-console.log('\n规则5：发射判定（辅助函数）')
-{
-  check('空文本不发', shouldEmit('') === false)
-  check('纯空白不发', shouldEmit('   ') === false)
-  check(`短于 ${MIN_SENTENCE_CHARS} 字的碎片不单独发`, shouldEmit('好的。') === false)
-  check(`够 ${MIN_SENTENCE_CHARS} 字可以发`,
-    shouldEmit('这是一句足够长的正常句子内容') === true)
-  check('force 一定发（流结束时不丢尾巴）', shouldEmit('嗯。', { force: true }) === true)
-}
-
 console.log('\n规则6：极端输入不崩')
 {
   check('空数组返回空批次', (() => {
@@ -161,7 +143,11 @@ console.log('\n规则6：极端输入不崩')
     return r.pieces.length === 0 && r.rest.length === 0
   })())
   check('全是空白返回空批次', packWindowSentences(['', '  ', '\n']).pieces.length === 0)
-  check('单字符文本不崩', packWindowSentences(['。']).pieces.length >= 0)
+  // 单字符片段：不能凭空吞掉，也不能变成两段（原先写成 `pieces.length >= 0` 恒真）。
+  check('单字符文本原样成段、不丢内容', (() => {
+    const r = packWindowSentences(['。'])
+    return r.pieces.length === 1 && r.pieces[0] === '。' && r.rest.length === 0
+  })(), JSON.stringify(packWindowSentences(['。'])))
   check('超长无标点文本会被硬切', (() => {
     const r = packWindowSentences(['字'.repeat(500)], { maxPieces: 999 })
     return r.pieces.every((p) => p.length <= MAX_SENTENCE_CHARS)

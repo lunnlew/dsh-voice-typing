@@ -5,8 +5,11 @@
  *   阶段 3 把 SSE 事件改成统一信封：
  *     data: {"v":2,"seq":12,"ts":1735000000000,"sessionId":"s1","text":"你好","turnId":"turn-x","index":0}
  *
- *   test/event-contract.test.mjs 检查的是**源码形状**（正则扫 lib/index.js），
- *   这个文件补的是它测不到的那一层：**真的把插件拉起来**，
+ *   （原 test/event-contract.test.mjs 已并入本文件：它检查的**源码形状**
+ *   （正则扫 lib/index.js）与信封断言大多重复，独有的一条「真实
+ *   buildEventEnvelope → 客户端 parseEnvelope 的 sentence 字段/para/paraStart
+ *   接缝」已迁到下面第 3b 节；原文件已删除。）
+ *   本文件真正补的是源码形状测不到的那一层：**真的把插件拉起来**，
  *   接一条真的 SSE 连接、跑真的 llm/stream 钩子，
  *   然后按帧解析 —— 确认线上跑的字节就是契约里写的那几个字段。
  *
@@ -339,9 +342,109 @@ console.log('\n跨端一致：客户端的 parseEnvelope 能原样解析宿主�
 }
 
 // ---------------------------------------------------------------------------
-// 4) 路由：配置与诊断分开，死路由删干净
+// 3b) sentence 契约：真实调度器产出 para/paraStart → 真实信封 → 客户端解析
+//
+// （由 test/event-contract.test.mjs 迁移而来 —— 该文件其余内容是信封形状的重复
+//   断言与「用自造 stub 断言 index 连续」的自证断言，已删除。）
+// 这里用**真实** createReadAloudScheduler + **真实** turnModel.nextSentenceIndex
+// 产句子，再用**真实** buildEventEnvelope + 客户端 parseEnvelope 走一遍接缝。
 // ---------------------------------------------------------------------------
-console.log('\n路由：配置与诊断数据分开')
+console.log('\nsentence 契约：真实调度器产出 → 真实信封 → 客户端解析')
+{
+  const { createReadAloudScheduler } = await import('../lib/read-aloud-scheduler.js')
+  const { createTurnModel } = await import('../lib/turn-model.js')
+  const { parseEnvelope } = await import('../src/client/pure/envelope.js')
+
+  // 真实生产实现：句子序号由 turnModel.nextSentenceIndex 分配（不是测试自己造的 stub），
+  // 「index 从 0 连续」因此是真断言，而不是自证。
+  const tm = createTurnModel({ getSessionsService: () => null })
+  const emitted = []
+  const scheduler = createReadAloudScheduler({
+    emit: (event, payload) => emitted.push({ event, payload }),
+    nextIndex: (sid) => tm.nextSentenceIndex(sid),
+  })
+  // 段落 0 故意超过单句上限（60 字）→ 段内切成多个片段；段落 1 很短 → 单片段。
+  const para0 = '这是用来测试段落内多个片段的第一句话。'
+    + '这是第二句话，内容要足够长以便超过单句上限。'
+    + '这是第三句话，继续补充一些内容让总长度明显超过六十个字的上限。'
+  const reader = scheduler.reader('sess-1', 'turn-abc')
+  reader.push(para0 + '\n\n第二段只有一句话。\n\n')
+  reader.end()
+
+  const sentences = emitted.filter((x) => x.event === 'sentence').map((x) => x.payload)
+  check('前置：至少切出 2 段、3 个片段', sentences.length >= 3, `pieces=${sentences.length}`)
+  check('每条 sentence 带 text/turnId/index/para/paraStart（类型正确）',
+    sentences.every((s) => typeof s.text === 'string' && s.text.trim().length > 0
+      && typeof s.turnId === 'string' && s.turnId.length > 0
+      && Number.isInteger(s.index) && s.index >= 0
+      && Number.isInteger(s.para) && s.para >= 0
+      && typeof s.paraStart === 'boolean'),
+    JSON.stringify(sentences[0]))
+  check('sentence.text 是清洗后的纯文本（不含 Markdown 标记）',
+    sentences.every((s) => !/[#*`>]/.test(s.text)), JSON.stringify(sentences.map((s) => s.text)))
+  check('index 从 0 连续递增（真实 turnModel 计数；客户端 (turnId,index) 去重的前提）',
+    sentences.every((s, i) => s.index === i), JSON.stringify(sentences.map((s) => s.index)))
+  check('para 从 0 开始、单调不减',
+    sentences[0]?.para === 0 && sentences.every((s, i) => i === 0 || s.para >= sentences[i - 1].para),
+    JSON.stringify(sentences.map((s) => s.para)))
+  const flagsByPara = new Map()
+  for (const s of sentences) {
+    if (!flagsByPara.has(s.para)) flagsByPara.set(s.para, [])
+    flagsByPara.get(s.para).push(s.paraStart)
+  }
+  check('每个 para 只有第一个片段 paraStart=true、其余 false',
+    [...flagsByPara.values()].every((flags) => flags[0] === true && flags.slice(1).every((f) => f === false)),
+    JSON.stringify([...flagsByPara.entries()]))
+  check('同一 para 的片段连续出现（段落不交叉）',
+    (() => {
+      const seen = new Set()
+      let last = -1
+      for (const s of sentences) {
+        if (s.para === last) continue
+        if (seen.has(s.para)) return false
+        seen.add(s.para)
+        last = s.para
+      }
+      return true
+    })(),
+    JSON.stringify(sentences.map((s) => s.para)))
+
+  // 接缝第二步：这些业务字段必须能被**真实信封 + 客户端解析**原样带过去。
+  const roundTrip = sentences.map((s) => parseEnvelope({ data: JSON.stringify(buildEventEnvelope(s)) }))
+  check('真实信封 + parseEnvelope 后 para/paraStart/index/turnId/text 原样保留',
+    roundTrip.every((p, i) => p.v === EVENT_PROTOCOL_VERSION
+      && p.para === sentences[i].para
+      && p.paraStart === sentences[i].paraStart
+      && p.index === sentences[i].index
+      && p.turnId === sentences[i].turnId
+      && p.text === sentences[i].text
+      && p.sessionId === 'sess-1'),
+    JSON.stringify(roundTrip[0]))
+  scheduler.dispose()
+}
+
+// 客户端侧的形状守卫（event-contract 独有的一条）：
+// 所有 SSE 消费都走 parseEnvelope，除解析器内部外没有裸 JSON.parse(event.data)
+// —— 裸解析在信封协议下拿不到业务字段。
+{
+  const CLI_SRC = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  const bare = (CLI_SRC.match(/JSON\.parse\(event\.data\)/g) || []).length
+  check('客户端：除 parseEnvelope 内部外没有裸的 JSON.parse(event.data)',
+    bare <= 1 && /parseEnvelope\(event\)/.test(CLI_SRC),
+    `裸解析 ${bare} 处`)
+}
+
+// 客户端解析器的健壮性（event-contract 迁移）：坏输入不能抛。
+{
+  const { parseEnvelope, belongsToSession } = await import('../src/client/pure/envelope.js')
+  check('坏 JSON 返回 null', parseEnvelope({ data: '{not json' }) === null)
+  check('非对象（JSON 字符串）返回 null', parseEnvelope({ data: '"hello"' }) === null)
+  check('空信封 belongsToSession 不崩（返回 false）', belongsToSession(null, 'sess-1') === false)
+}
+
+// ---------------------------------------------------------------------------
+// 4) 路由：配置与诊断分开，死路由删干净
+// ---------------------------------------------------------------------------console.log('\n路由：配置与诊断数据分开')
 {
   const host = makeHost({ readAloud: true, preloadModels: false })
   const configDef = host.routes.get('/dsh-voice-typing/config')

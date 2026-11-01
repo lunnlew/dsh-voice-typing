@@ -287,6 +287,85 @@ console.log('\nP3：CRLF 的源文件照样能内联（真跑一遍 bundle 脚�
   check('产物里没有混进 \\r（行尾统一成 LF）', !bundled.includes('\r'))
 }
 
+console.log('\n跨平台：所有「改名成最终文件」必须走 replaceFile')
+{
+  // Windows 上 rename 覆盖已存在目标会 EPERM/EBUSY（POSIX 不会），
+  // 所以「改名成最终文件」都必须走 lib/atomic-file.js 里的 replaceFile。
+  const atomic = fs.readFileSync(path.join(root, 'lib', 'atomic-file.js'), 'utf8')
+  const cat = fs.readFileSync(path.join(root, 'lib', 'model-catalog.js'), 'utf8')
+  const idx = fs.readFileSync(path.join(root, 'lib', 'index.js'), 'utf8')
+  check('replaceFile 已定义', /export async function replaceFile\(from, to/.test(atomic))
+  check('helper 内部是「先试 rename，失败再退避重试」',
+    /await rename\(from, to\)/.test(atomic)
+    && /EPERM/.test(atomic) && /EBUSY/.test(atomic),
+    'Windows 上目标被杀毒软件/索引器瞬时占用时 rename 会 EPERM/EBUSY，需要重试')
+  check('重试有退避间隔', /setTimeout\(resolve, 200 \* i\)/.test(atomic))
+  check('非瞬时错误不重试（直接抛出）', /if \(!transient \|\| i === attempts\) throw error/.test(atomic))
+
+  // helper 之外不能有裸的 await rename（改名成最终文件都要走重试）
+  for (const [name, src] of [['model-catalog.js', cat], ['index.js', idx]]) {
+    const bare = [...src.matchAll(/await rename\(/g)]
+    check(`${name} 里没有裸的 await rename`, bare.length === 0, `${bare.length} 处`)
+    check(`${name} 用的是共用模块的 replaceFile`, /from '\.\/atomic-file\.js'/.test(src))
+  }
+}
+
+console.log('\n跨平台：原生模块必须声明为 optionalDependencies')
+{
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
+  const idx = fs.readFileSync(path.join(root, 'lib', 'index.js'), 'utf8')
+  // 代码里有 WASM 兜底，说明设计上支持「原生装不上」
+  const hasFallback = /for \(const name of \['sherpa-onnx-node', 'sherpa-onnx'\]\)/.test(idx)
+  check('代码里有原生 → WASM 的兜底', hasFallback)
+  check('原生模块不在 dependencies 里（否则装不上就 install 失败）',
+    !pkg.dependencies?.['sherpa-onnx-node'],
+    '有 WASM 兜底却把它写死在 dependencies 里，装不上就是硬失败')
+  check('原生模块在 optionalDependencies 里',
+    !!pkg.optionalDependencies?.['sherpa-onnx-node'])
+  check('WASM 版 sherpa-onnx 在 dependencies 里',
+    !!pkg.dependencies?.['sherpa-onnx'])
+}
+
+console.log('\n跨平台：路径分隔符 / ESM 限制 / DSH_HOME 覆盖')
+{
+  const files = ['lib/index.js', 'lib/model-catalog.js', 'lib/local-tts.js',
+    'lib/neural-tts.js', 'lib/edge-tts.js', 'lib/asr-worker.js', 'lib/tts-worker.js']
+  const hits = []
+  for (const f of files) {
+    const txt = fs.readFileSync(path.join(root, f), 'utf8')
+    txt.split('\n').forEach((l, i) => {
+      const code = l.replace(/\/\/.*$/, '').replace(/^\s*\*.*$/, '')
+      // 手写分隔符拼接路径
+      if (/['"]\/['"]\s*\+|['"]\\\\['"]\s*\+/.test(code)) {
+        hits.push(`${f}:${i + 1}: ${l.trim().slice(0, 70)}`)
+      }
+    })
+  }
+  check('没有手写分隔符拼路径', hits.length === 0, hits.slice(0, 3).join(' | '))
+
+  const esmFiles = ['lib/index.js', 'lib/model-catalog.js', 'lib/local-tts.js',
+    'lib/neural-tts.js', 'lib/edge-tts.js', 'lib/asr-worker.js', 'lib/tts-worker.js',
+    'lib/tts-env.js', 'lib/text-rules.js', 'scripts/bundle-client.mjs']
+  const esmHits = []
+  for (const f of esmFiles) {
+    const txt = fs.readFileSync(path.join(root, f), 'utf8')
+    txt.split('\n').forEach((l, i) => {
+      const code = l.replace(/\/\/.*$/, '').replace(/^\s*\*.*$/, '')
+      if (/(?<![a-zA-Z_$])__(dirname|filename)\b/.test(code)) {
+        esmHits.push(`${f}:${i + 1}: ${l.trim().slice(0, 70)}`)
+      }
+    })
+  }
+  check('没有 __dirname / __filename（ESM 里不存在）',
+    esmHits.length === 0, esmHits.slice(0, 3).join(' | '))
+
+  for (const f of ['lib/index.js', 'lib/model-catalog.js']) {
+    const txt = fs.readFileSync(path.join(root, f), 'utf8')
+    check(`${f} 支持 DSH_HOME 覆盖`, /process\.env\.DSH_HOME/.test(txt))
+    check(`${f} 默认用 homedir()`, /homedir\(\)/.test(txt))
+  }
+}
+
 console.log(`\n通过 ${passed}，失败 ${failed}`)
 fs.rmSync(tmpRoot, { recursive: true, force: true })
 process.exitCode = failed ? 1 : 0

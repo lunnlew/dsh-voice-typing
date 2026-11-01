@@ -39,6 +39,15 @@ function check(name, ok, detail) {
   else { failed++; console.log('  ✗ ' + name + (detail ? '：' + detail : '')) }
 }
 
+/**
+ * 慢集成开关：真实加载 SenseVoice（约 230MB）默认**不跑**。
+ *
+ * 原因：CI 上既没有 DSH 语音输入 Bundle 也没下载过模型（跑了也是 skip/名义覆盖）；
+ * 开发机有模型时单跑要 80~90s，与「单元测试套件」的定位不符。
+ * 要跑真实预加载集成时显式设置 `DSH_VT_SLOW_TESTS=1`（本机需已有 SenseVoice 模型）。
+ */
+const SLOW_TESTS = process.env.DSH_VT_SLOW_TESTS === '1'
+
 console.log('主线程：handler 必须传整个 message')
 {
   const handler = idx.slice(idx.indexOf("worker.on('message'"), idx.indexOf("worker.on('message'") + 900)
@@ -68,14 +77,18 @@ console.log('\n真跑一个 worker（不加载模型，只验证消息契约）'
 {
   const worker = new Worker(path.join(root, 'lib/asr-worker.js'))
   const received = []
+  let timer = null
   const done = new Promise((resolve) => {
     worker.on('message', (m) => { received.push(m); resolve(m) })
     worker.on('error', (e) => { received.push({ error: e.message }); resolve(null) })
-    setTimeout(() => resolve(null), 8000)
+    // 兜底定时器：unref + 拿到结果后 clear —— 不能让它把进程拖住 8 秒。
+    timer = setTimeout(() => resolve(null), 8000)
+    timer.unref?.()
   })
   // 发一个必然失败的 preload（缺 spec）—— 目的是看**失败**回包的形状
   worker.postMessage({ kind: 'preload', id: 1 })
   const msg = await done
+  clearTimeout(timer)
   check('worker 回了消息', !!msg, JSON.stringify(msg))
   if (msg) {
     check('失败回包带 ok:false', msg.ok === false, JSON.stringify(msg))
@@ -85,24 +98,29 @@ console.log('\n真跑一个 worker（不加载模型，只验证消息契约）'
   await worker.terminate()
 }
 
-console.log('\n预加载成功路径的真实验证（加载 SenseVoice）')
-{
+console.log('\n预加载成功路径的真实验证（加载 SenseVoice，慢集成，默认不跑）')
+if (!SLOW_TESTS) {
+  // 显式 skip（输出里说明原因），不参与失败计数；代码保留在 else 分支里，
+  // 需要时用 DSH_VT_SLOW_TESTS=1 单跑，断言不会丢。
+  console.log('  ⏭ 跳过：真实 SenseVoice 预加载集成默认不跑（设 DSH_VT_SLOW_TESTS=1 启用；本机需有模型）。')
+} else {
   const cat = await import('../lib/model-catalog.js?probe=' + Date.now())
   const model = cat.findModel('sensevoice')
   let paths = null
   try { paths = cat.modelPaths(model) } catch { }
   if (!paths) {
-    // 这是一个需要真实 SenseVoice 模型（约 230MB）的集成测试。
-    // CI 上既没有 DSH 语音输入 Bundle，也没下载过模型 —— 硬要在这里
-    // 失败只会让每次 push 都红，而且与代码正确性无关。
-    // 所以模型不在时**跳过**（说明原因），不参与失败计数。
+    // 需要真实 SenseVoice 模型（约 230MB）。CI 上既没有 DSH 语音输入 Bundle，
+    // 也没下载过模型 —— 硬要失败只会让每次 push 都红，而且与代码正确性无关。
     console.log('  ⏭ 跳过：本机没有 SenseVoice 模型（宿主未装语音输入 Bundle，且未下载）。需要模型才能真跑预加载。')
   } else {
     const worker = new Worker(path.join(root, 'lib/asr-worker.js'))
+    let timer = null
     const done = new Promise((resolve) => {
       worker.on('message', (m) => resolve(m))
       worker.on('error', (e) => resolve({ ok: false, error: e.message }))
-      setTimeout(() => resolve({ ok: false, error: 'timeout' }), 90000)
+      // 模型加载可能要十几秒；90s 兜底定时器同样 unref + 用后清理。
+      timer = setTimeout(() => resolve({ ok: false, error: 'timeout' }), 90000)
+      timer.unref?.()
     })
     worker.postMessage({
       kind: 'preload',
@@ -118,6 +136,7 @@ console.log('\n预加载成功路径的真实验证（加载 SenseVoice）')
       },
     })
     const msg = await done
+    clearTimeout(timer)
     check('预加载成功时回包带 ok:true', msg?.ok === true, JSON.stringify(msg)?.slice(0, 160))
     check('回包带 preloaded', msg?.preloaded === true, JSON.stringify(msg)?.slice(0, 160))
     // 这才是关键：主线程的解包逻辑必须能把它认成成功

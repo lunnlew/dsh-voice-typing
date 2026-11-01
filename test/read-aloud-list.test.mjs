@@ -75,5 +75,20 @@ console.log('\n列表项的整句仍然完整（不因去编号而断裂）')
   check('每句都以句号结尾（完整句）', lines.every((l) => l.endsWith('。')), JSON.stringify(lines))
 }
 
+// ---------------------------------------------------------------------------
+// 以下从原 read-aloud.test.mjs 迁入：该文件其余部分是对 index.js 的源码形状断言，
+// 与 event-envelope（busy 运行时）/ event-contract（sentence 字段真调度器）/
+// read-aloud-chain（接线 e2e）重复，已随文件删除；SSML 转义是全仓唯一的真行为断言。
+// ---------------------------------------------------------------------------
+console.log('\nSSML 转义（含 < 或 & 的回复不能整段无声）')
+{
+  const strip = stripForSpeech
+  check('a < b 被转义', strip('a < b').includes('&lt;'), strip('a < b'))
+  check('x & y 被转义', strip('x & y').includes('&amp;'), strip('x & y'))
+  check('普通句子不受影响', strip('你好，今天天气怎么样？') === '你好，今天天气怎么样？', strip('你好，今天天气怎么样？'))
+  check('转义在最后一步（避免 & 被重复转义）',
+    /&amp;/.test(strip('AT&T')) && !/&amp;amp;/.test(strip('AT&T')), strip('AT&T'))
+}
+
 console.log(`\n通过 ${passed}，失败 ${failed}`)
 process.exitCode = failed ? 1 : 0

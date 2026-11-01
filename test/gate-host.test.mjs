@@ -33,6 +33,11 @@ check('advanceGate 不带 opts 也能用（缺省就是 DEFAULT_GATE_OPTS）',
     return JSON.stringify(a) === JSON.stringify(b)
   })())
 check('宿主导出了默认门限常数', !!DEFAULT_GATE_OPTS)
+// stream-gate.test.mjs 删除后保留这一条形状守卫：门限判定必须走导出的纯函数，
+// 不能被重新内联回 /asr-stream 路由（内联后行为测试仍是绿的，但双份实现会漂移）。
+check('/asr-stream 的门限判定走导出的 advanceGate（没有重新内联）',
+  /const gateResult = advanceGate\(state, level\)/.test(HOST_SRC),
+  '门限逻辑被内联回路由后，gate-host 的行为测试可能仍绿，但两份实现会漂移')
 
 console.log('\n默认常数与共享用例表一致')
 check(

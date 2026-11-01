@@ -38,6 +38,13 @@ const hostRoutes = [...new Set(
 
 console.log(`客户端调用 ${clientRoutes.length} 个路由，宿主注册 ${hostRoutes.length} 个`)
 
+// 防御：正则失配时两个集合会变成空 → 下面所有循环断言都「空过」，
+// 测试全绿但什么也没检查（审计发现的假绿风险）。这里给出非空下限。
+check('能解析出客户端路由（防止正则失配导致 0 断言空过）',
+  clientRoutes.length >= 3, `只解析出 ${clientRoutes.length} 个：${clientRoutes.join(',') || '（空）'}`)
+check('能解析出宿主路由（防止正则失配导致 0 断言空过）',
+  hostRoutes.length >= 3, `只解析出 ${hostRoutes.length} 个：${hostRoutes.join(',') || '（空）'}`)
+
 console.log('\n客户端调用的路由宿主必须都有')
 for (const r of clientRoutes) {
   const base = r.split('?')[0]
