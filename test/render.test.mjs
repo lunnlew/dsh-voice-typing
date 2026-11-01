@@ -106,6 +106,26 @@ if (MicComponent) {
   }
 }
 
+// ── 3b. 设置面板默认态（readAloud 默认关闭）仍渲染合成区并带提示 ──
+// task-18：朗读关闭时也要允许预配语音引擎/SoVITS，不再整块隐藏。
+{
+  const settingsReg = registrations.find((r) => r.options?.name === 'settings.section')
+  if (settingsReg) {
+    try {
+      const html = renderToStaticMarkup(React.createElement(settingsReg.component, {
+        __initialConfig: { readAloud: false, shortcut: 'Alt+V' },
+        __initialModels: [],
+        t: (k) => k,
+      }))
+      check('设置面板默认态渲染成功', html.length > 0, '空 HTML')
+      check('readAloud=false 时仍显示语音引擎（可预配 TTS）', html.includes('>ttsEngine<'))
+      check('readAloud=false 时显示「仅保存、不生效」提示', html.includes('readAloudOffNotice'))
+    } catch (error) {
+      check('设置面板默认态渲染成功', false, error && error.message)
+    }
+  }
+}
+
 // ── 4. 槽位的惰性回调（label / description / hint）必须能调用 ──
 // SSR 渲染不会调用它们，宿主真正渲染 slot 时才调用；不主动调一遍的话，
 // 「引用了组件内部局部变量」这类错误会漏过全部测试，到界面上才炸成白屏。

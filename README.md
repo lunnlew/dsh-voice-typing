@@ -152,7 +152,7 @@ dsh plugin --profile desktop add dsh-voice-typing
 | 设置 | 作用 | 怎么调 |
 | --- | --- | --- |
 | **识别模型** | 用哪套模型认字 | 见 [第 6 节](#6-模型与下载该选哪个)。默认 SenseVoice，零下载。 |
-| **识别语言** | 告诉模型你说的是哪种语言 | `自动`（推荐，由模型判断）/ 中文 / 英文 / 粤语 / 日文 / 韩文 |
+| **识别语言** | 告诉模型你说的是哪种语言（**仅 SenseVoice 生效**；Whisper/zipformer2 会忽略，UI 会按模型禁用/提示） | `自动`（推荐，由模型判断）/ 中文 / 英文 / 粤语 / 日文 / 韩文 |
 | **交互模式** | 说完一段之后怎么办 | `连续对话`（默认）：说完自动接下一轮，麦克风不关；`说完就关`：说完就退出语音模式。 |
 | **静音断句（毫秒）** | 静音多久算「说完一句」 | 默认 `1500`。**太短**会把长句切断；**太长**回复会慢。 |
 | **实时字方式** | 说话时实时出字用哪种方式 | 见下方说明。默认「整段重识别」（精度最好）。 |
@@ -168,6 +168,7 @@ dsh plugin --profile desktop add dsh-voice-typing
 | **自动** | 流式模型用流式，否则整段 | — | 不确定时 |
 
 > 最终稿（断句后的那次识别）**始终**用当前模型，不受「实时字方式」影响。
+> 「流式解码」**固定依赖 zipformer2-zh**（与当前所选识别模型无关）；它没下载时 UI 会提示，实际会回退整段重识别。
 
 ---
 
@@ -187,7 +188,7 @@ dsh plugin --profile desktop add dsh-voice-typing
 | **朗读音量** | 大小 | 在线与本地支持（如 `+0%`），神经模型不支持 |
 | **音频格式** | MP3 码率 | 只有在线 Edge 支持。`24kHz/48kbps`（推荐）/ `24kHz/96kbps`（音质更好） |
 
-**三种语音引擎对比：**
+**四种语音引擎对比：**
 
 | 引擎 | 音质 | 联网 | 速度 | 备注 |
 | --- | --- | --- | --- | --- |
@@ -198,6 +199,9 @@ dsh plugin --profile desktop add dsh-voice-typing
 
 > 在线引擎合成失败时**自动回退到本地**，保证「总有声音」。
 > GPT-SoVITS 外部服务**不回退**（避免把文本发给微软、也避免偷偷换音色），失败见 `/diagnostics` 的 `sovitsTts`。
+>
+> 配置保存会做校验：非法枚举/类型/范围（如 `ttsEngine` 未知、`sovitsUrl` 非 http(s)、`readAloudLag` 非数字）返回 400 并显示错误，不会被静默改成别的值。
+> 朗读关闭时，下面的引擎/音色等设置仍会显示并保存（只是不生效），方便先配置好再开朗读。
 
 **外部 GPT-SoVITS 引擎（可选）**
 
@@ -816,7 +820,7 @@ GPT-SoVITS 是 PyTorch 推理体系（官方只提供 `api_v2.py` HTTP 服务）
 
 #### 改动之后
 
-- `npm test` 必须全绿（39 个文件；先跑 `bundle-sync` 校验产物同步，再跑 `client-behavior` 行为回归）。
+- `npm test` 必须全绿（42 个文件；先跑 `bundle-sync` 校验产物同步，再跑 `client-behavior` 行为回归）。
 - 需要连活插件的集成测试单独跑：`npm run test:silence -- http://127.0.0.1:<端口>`。
 - 需要跑「真加载模型」的慢集成（SenseVoice 预加载等）：`$env:DSH_VT_SLOW_TESTS=1; npm test`。
   默认套件走快速路径并显式打印 ⏭ 跳过，不会悄悄漏测。
@@ -827,6 +831,26 @@ GPT-SoVITS 是 PyTorch 推理体系（官方只提供 `api_v2.py` HTTP 服务）
   改完 `lib/client.js`（浏览器侧）要**浏览器强制刷新**。
 - 改完 `src/client/pure/` 要跑 **`npm run build:client`** 重新生成 `lib/client.js`。
   `npm test` 里的 `bundle-sync.test.mjs` 会检查产物是否同步。
+
+#### 配置项的配合关系（生效条件矩阵）
+
+配置统一走 `GET/POST /config`：GET 返回**已归一化**的完整配置；POST 是 **patch**（只接受已声明键）。
+加载时非法/越界值回退默认并记入 `/diagnostics.configWarnings`；保存时非法值返回 `400 {ok:false, errors}`，不会静默改值。
+
+| 配置 | 生效条件 / 配合 |
+|---|---|
+| `readAloud` | 朗读总开关。关闭时 `/tts` 不会被调用；但朗读相关设置仍可编辑/保存 |
+| `ttsEngine` | `online`→voice/pitch/volume/ttsFormat；`neural`→neuralModel/neuralSpeaker；`local`→localVoice；`sovits`→sovits*（rate 转 speed_factor）。**非法值保存被拒，运行时不静默落 online** |
+| `rate` | 四种引擎都生效（online/local 百分比、neural 倍率、sovits speed_factor 0.5~2） |
+| `pitch` / `volume` / `ttsFormat` | 仅特定引擎有效：pitch/format 仅 online，volume 仅 online/local |
+| `readAloudLag` | 只在 flow（客户端 ack）模式生效；`0`=关闭追赶；非有限值回退默认（7.5） |
+| `language` | **只对 SenseVoice 生效**；Whisper/zipformer2 忽略（UI 按模型禁用/提示） |
+| `liveAsr` | `stream` 固定依赖 zipformer2-zh（与 `model` 无关）；不可用时提示并回退整段 |
+| `model` | 必须是已声明档位；非法值保存被拒，运行时不再静默回退 SenseVoice |
+| `autoSend` | 关闭时 `autoSendExtraMs` 隐藏；`mode=once` 的「说完退出」只在自动发送后发生，因此会禁用并说明 |
+| `preloadModels` × `idleReleaseMinutes` | 预加载只覆盖 model/neural（不覆盖 liveAsr 的 zipformer2）；idle 释放不释放当前选中模型；`0`=永不释放 |
+| `sovits*` | 只对 `ttsEngine=sovits` 生效；`sovitsRefAudio` 是**服务端机器**可访问路径（官方 api_v2 每请求必填），留空则不带该字段由服务端决定 |
+| `words` | 热词仅 zipformer2（transducer）生效；按行保存，保存时 trim/去空 |
 
 #### CI 与自动发布（GitHub Actions）
 

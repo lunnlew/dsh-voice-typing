@@ -58,7 +58,56 @@ check('没有写入点落在麦克风按钮里', inMic.length === 0,
 
 console.log('\n设置面板是共享存储的权威来源')
 check('设置面板加载时会写入', /configStore\.set\(data\)/.test(cli))
-check('设置面板保存后会写入', /configStore\.set\(data\.config\)/.test(cli))
+// 保存时写入的是**归一化后的 payload** / 服务端回填的 effective，
+// 不再是直接把表单原样写进共享存储（旧实现会把非法值同步给麦克风按钮）。
+check('设置面板保存后会写入归一化后的配置',
+  /configStore\.set\(payload\)/.test(cli) && /configStore\.set\(effective\)/.test(cli))
+
+/**
+ * 取两个锚点之间的源码（不含结束行）。
+ * blockOf 用括号配平，模板字符串/正则里的括号会干扰；这里按「下一个已知符号」
+ * 切段更稳（save/reload 的边界都是已知的 useCallback 定义）。
+ */
+function sectionOf(startText, endText) {
+  const start = lines.findIndex((l) => l.includes(startText))
+  if (start < 0) return ''
+  let end = lines.length
+  for (let k = start + 1; k < lines.length; k++) {
+    if (lines[k].includes(endText)) { end = k; break }
+  }
+  return lines.slice(start, end).join('\n')
+}
+
+console.log('\n编辑中的 reload 不得清掉「未保存」状态（审计 F2）')
+{
+  const reloadRaw = sectionOf('const reload = useCallback', 'const loadModels = useCallback')
+  // 剥注释再断言：注释里会提到「旧实现会 setDirty(false) / setLoaded(true)」，
+  // 不剥会把注释当成真代码（恒真/恒假）。
+  const reloadBlock = reloadRaw
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+  check('reload 里有 dirty 保护', /if \(!dirtyRef\.current\) \{/.test(reloadBlock))
+  check('reload 只在未 dirty 时 setDirty(false)',
+    (reloadBlock.match(/setDirty\(false\)/g) || []).length === 1)
+  const dirtyGuard = reloadBlock.indexOf('if (!dirtyRef.current) {')
+  const clearDirty = reloadBlock.indexOf('setDirty(false)')
+  check('setDirty(false) 位于 dirty 保护块内',
+    dirtyGuard >= 0 && clearDirty > dirtyGuard,
+    `guard=${dirtyGuard} clear=${clearDirty}`)
+  check('加载失败不放开保存（catch 里是 setLoaded(false)）',
+    /catch[\s\S]{0,900}?setLoaded\(false\)/.test(reloadBlock)
+    && !/catch[\s\S]{0,900}?setLoaded\(true\)/.test(reloadBlock))
+}
+
+console.log('\n保存前归一化 + 校验错误可见（审计 F7/F8/F13）')
+{
+  const saveBlock = sectionOf('const save = useCallback', 'const runEnvCheck = useCallback')
+  check('保存前调用 normalizeForSave', /normalizeForSave\(/.test(saveBlock))
+  check('POST 的是归一化后的 payload', /body: JSON\.stringify\(payload\)/.test(saveBlock))
+  check('400 的 errors 转成可读信息展示', /collectSaveErrors\(data\)/.test(saveBlock))
+  check('保存失败保持 dirty（不提前 setDirty(false)）',
+    saveBlock.indexOf('setDirty(false)') > saveBlock.indexOf('!resp.ok'))
+}
 
 console.log(`\n通过 ${passed}，失败 ${failed}`)
 process.exitCode = failed ? 1 : 0

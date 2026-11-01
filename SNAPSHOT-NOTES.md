@@ -1,6 +1,6 @@
 # dsh-voice-typing 代码快照说明
 
-版本：0.0.2 　生成时间：2026-11-01 19:45（测试精简：磁盘 52→39 个测试文件、npm test 从 51→38 项、211s→38s）
+版本：0.0.2 　生成时间：2026-11-01 21:35（配置加固：schema 校验 / 引擎归一化 / UI 联动；npm test 42 项）
 
 ## 文件结构
 
@@ -13,6 +13,7 @@
 | `lib/local-tts.js` | 本地 TTS：调用 Windows SAPI（PowerShell）/ macOS say / espeak-ng，完全离线 |
 | `lib/neural-tts.js` | 本地神经 TTS（sherpa-onnx VITS）宿主侧封装：工作线程收发、预加载与释放、WAV 编码 |
 | `lib/sovits-tts.js` | **外部 GPT-SoVITS 引擎客户端**：按官方 `api_v2` 的 `/tts` 契约转发文本（含用户配置的参考音频/文本/语言），拿回 wav；不内置模型、不做克隆、失败不回退 |
+| `lib/config-schema.js` | **配置 schema**（纯函数）：28 个键的类型/枚举/范围/URL/词表校验；加载 `sanitizeConfig`（非法回退默认 + warnings）、保存 `validateConfigPatch`（非法 → 400 errors） |
 | `lib/tts-worker.js` | 本地神经 TTS 工作线程（VITS 推理） |
 | `lib/tts-env.js` | 合成运行环境自检（引擎可用性、平台能力） |
 | `src/client/pure/*.js` | 浏览器侧纯函数源码（门限 / 草稿 / 信封 / 朗读积压 / 定时器），由脚本内联进 `lib/client.js` |
@@ -392,6 +393,14 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
 
 > 真实模型的慢集成（SenseVoice 预加载等）：`DSH_VT_SLOW_TESTS=1 npm test`；默认套件走快速路径并显式跳过。
 
+### 7.10 配置校验与配合（2026-11）
+
+- **统一 schema**（`lib/config-schema.js`）：加载时 sanitize（非法/越界回退默认，可观测到 `/diagnostics.configWarnings`）；保存时 validate（非法 → `400 {ok:false,errors}`）。
+- **引擎归一化**：`online/local/neural/sovits` 白名单；非法值不会再静默落 online（不再把文本误发给 Edge）；`/tts/warmup` 只对 online 预热；`/voices` 对 neural/sovits 返回空列表；`/tts/env` 含 sovits。
+- **识别模型解析一致**：非法档位保存被拒、运行时 400（不再静默回退 SenseVoice）；空闲释放保护实际解析出的模型。
+- **UI 联动/依赖**：language 只对 SenseVoice 生效；`liveAsr=stream` 依赖 zipformer2-zh；`autoSend=false` 时 `mode=once` 禁用；朗读关闭时仍可预配引擎；`words` 输入保留原始文本、保存时归一化；reload 不再清掉未保存修改；本地→在线回退会在 UI 提示。
+- 见 README「配置项的配合关系（生效条件矩阵）」。
+
 ## 已知限制
 
 1. **本地 TTS 每次要起 PowerShell 进程**（~800ms），可以改成常驻进程但复杂度高
@@ -415,7 +424,7 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
 ## 回归测试
 
 ```bash
-npm test             # 39 个测试文件（不连宿主；先跑 bundle-sync + client-behavior）
+npm test             # 42 个测试文件（不连宿主；先跑 bundle-sync + client-behavior）
 npm run build:client # 把 src/client/pure/ 内联进 lib/client.js
 npm run check:client # 只校验产物是否最新（CI 用）
 npm run test:silence -- http://127.0.0.1:<端口>   # 静音与流式识别回归（需要宿主在运行）
