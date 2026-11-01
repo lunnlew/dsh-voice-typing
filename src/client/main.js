@@ -156,7 +156,16 @@ window.__ModuleLoader__.load({
       modeToggle: '连续对话',
       modeOnce: '说完就关',
       ttsEngine: '语音引擎',
-      ttsEngineHint: '在线音质好但需要网络；神经模型完全离线且音质接近在线；系统语音最快但机器感较强。',
+      ttsEngineHint: '在线音质好但需要网络；神经模型完全离线且音质接近在线；系统语音最快但机器感较强；GPT-SoVITS 使用你自己跑的服务（插件只转发文本合成）。',
+      sovitsHint: '外部 GPT-SoVITS：插件不内置模型、也不做克隆，只把每句文本 POST 到你自己的 api_v2 服务（默认 127.0.0.1:9880）；参考音频/文本由你配置，失败不会回退在线引擎。',
+      sovitsUrl: 'GPT-SoVITS 服务地址',
+      sovitsUrlHint: '官方 api_v2 默认 http://127.0.0.1:9880；填到 /tts 或只填服务根地址都行。',
+      sovitsRefAudio: '服务端参考音频路径',
+      sovitsRefAudioHint: '必须是 GPT-SoVITS 所在机器上可访问的 wav 路径（官方 api_v2 每个请求都要求它）。',
+      sovitsPromptText: '参考音频文本',
+      sovitsPromptTextHint: '参考音频里说的内容；留空则使用服务端默认。',
+      sovitsTextLang: '合成语言',
+      sovitsPromptLang: '参考音频语言',
       neuralModel: '神经模型',
       neuralSpeaker: '说话人',
       neuralReady: '已就绪',
@@ -258,7 +267,16 @@ window.__ModuleLoader__.load({
       modeToggle: 'Continuous conversation',
       modeOnce: 'Say once',
       ttsEngine: 'Speech engine',
-      ttsEngineHint: 'Online sounds best but needs network; neural models are offline with near-online quality; system voices are fastest but robotic.',
+      ttsEngineHint: 'Online sounds best but needs network; neural models are offline with near-online quality; system voices are fastest but robotic; GPT-SoVITS uses your own server (the plugin only forwards text for synthesis).',
+      sovitsHint: 'External GPT-SoVITS: the plugin ships no model and does no cloning — it only POSTs each sentence to your api_v2 server (default 127.0.0.1:9880). Reference audio/text are configured by you; failures never fall back to online.',
+      sovitsUrl: 'GPT-SoVITS server URL',
+      sovitsUrlHint: 'Official api_v2 defaults to http://127.0.0.1:9880; either the /tts endpoint or the service root works.',
+      sovitsRefAudio: 'Reference audio path (server-side)',
+      sovitsRefAudioHint: 'A wav path readable on the GPT-SoVITS machine (the official api_v2 requires it on every request).',
+      sovitsPromptText: 'Reference audio text',
+      sovitsPromptTextHint: 'What the reference audio says; leave empty to use the server default.',
+      sovitsTextLang: 'Synthesis language',
+      sovitsPromptLang: 'Reference audio language',
       neuralModel: 'Neural model',
       neuralSpeaker: 'Speaker',
       neuralReady: 'Ready',
@@ -3190,6 +3208,8 @@ window.__ModuleLoader__.load({
        * @param {string} engine - online / local。
        */
       const loadVoices = useCallback(async (engine) => {
+        // GPT-SoVITS 的音色/参考音频都在用户自己的服务端配置，插件没有音色列表可加载。
+        if (engine === 'sovits') return
         const target = engine === 'local' ? 'local' : 'online'
         try {
           const resp = await fetch(`${BASE}/voices?engine=${target}${target === 'online' ? '&lang=zh' : ''}`)
@@ -3435,6 +3455,9 @@ window.__ModuleLoader__.load({
       const isOnline = engine === 'online'
       const isNeural = engine === 'neural'
       const isLocal = engine === 'local'
+      const isSovits = engine === 'sovits'
+      /** GPT-SoVITS 官方 api_v2 支持的合成/参考语言。 */
+      const SOVITS_LANGS = ['zh', 'en', 'ja', 'ko', 'yue']
       const readAloudOn = config.readAloud === true
 
       return React.createElement(
@@ -3670,6 +3693,7 @@ window.__ModuleLoader__.load({
                       ['local', localSupported
                         ? '本地系统语音（离线可用，速度快）'
                         : '本地系统语音（当前平台不支持）'],
+                      ['sovits', 'GPT-SoVITS 外部服务（用你自己配置好的服务）'],
                     ].map(([v, label]) => React.createElement('option', { key: v, value: v, disabled: v === 'local' && !localSupported }, label)),
                   ),
                   React.createElement(
@@ -3678,6 +3702,96 @@ window.__ModuleLoader__.load({
                     t('ttsEngineHint'),
                   ),
                 ),
+
+                /* GPT-SoVITS 外部服务：插件只转发文本，不做克隆/模型管理 */
+                isSovits
+                  ? React.createElement(
+                      React.Fragment,
+                      null,
+                      React.createElement(
+                        Label,
+                        null,
+                        React.createElement('span', null, t('sovitsUrl')),
+                        React.createElement('input', {
+                          type: 'text',
+                          value: config.sovitsUrl ?? 'http://127.0.0.1:9880',
+                          onChange: (event) => set('sovitsUrl', event.target.value),
+                          style: inputStyle,
+                        }),
+                        React.createElement(
+                          'span',
+                          { style: { fontSize: 12, opacity: 0.7 } },
+                          t('sovitsUrlHint'),
+                        ),
+                      ),
+                      React.createElement(
+                        Label,
+                        null,
+                        React.createElement('span', null, t('sovitsRefAudio')),
+                        React.createElement('input', {
+                          type: 'text',
+                          value: config.sovitsRefAudio ?? '',
+                          placeholder: '/path/to/reference.wav',
+                          onChange: (event) => set('sovitsRefAudio', event.target.value),
+                          style: inputStyle,
+                        }),
+                        React.createElement(
+                          'span',
+                          { style: { fontSize: 12, opacity: 0.7 } },
+                          t('sovitsRefAudioHint'),
+                        ),
+                      ),
+                      React.createElement(
+                        Label,
+                        null,
+                        React.createElement('span', null, t('sovitsPromptText')),
+                        React.createElement('input', {
+                          type: 'text',
+                          value: config.sovitsPromptText ?? '',
+                          onChange: (event) => set('sovitsPromptText', event.target.value),
+                          style: inputStyle,
+                        }),
+                        React.createElement(
+                          'span',
+                          { style: { fontSize: 12, opacity: 0.7 } },
+                          t('sovitsPromptTextHint'),
+                        ),
+                      ),
+                      React.createElement(
+                        Label,
+                        null,
+                        React.createElement('span', null, t('sovitsTextLang')),
+                        React.createElement(
+                          'select',
+                          {
+                            value: config.sovitsTextLang ?? 'zh',
+                            onChange: (event) => set('sovitsTextLang', event.target.value),
+                            style: inputStyle,
+                          },
+                          SOVITS_LANGS.map((v) => React.createElement('option', { key: v, value: v }, v)),
+                        ),
+                      ),
+                      React.createElement(
+                        Label,
+                        null,
+                        React.createElement('span', null, t('sovitsPromptLang')),
+                        React.createElement(
+                          'select',
+                          {
+                            value: config.sovitsPromptLang ?? 'zh',
+                            onChange: (event) => set('sovitsPromptLang', event.target.value),
+                            style: inputStyle,
+                          },
+                          SOVITS_LANGS.map((v) => React.createElement('option', { key: v, value: v }, v)),
+                        ),
+                      ),
+                      React.createElement(
+                        'span',
+                        { style: { fontSize: 12, opacity: 0.7, lineHeight: 1.5 } },
+                        t('sovitsHint'),
+                      ),
+                    )
+                  : null,
 
                 /* 音色：在线用 Edge 音色，神经用模型+说话人，本地用系统语音 */
                 isNeural
@@ -3728,7 +3842,9 @@ window.__ModuleLoader__.load({
                         )
                       })(),
                     )
-                  : React.createElement(
+                  : isSovits
+                    ? null
+                    : React.createElement(
                       Label,
                       null,
                       React.createElement('span', null, t('voice')),
@@ -3789,8 +3905,8 @@ window.__ModuleLoader__.load({
                       ),
                     )
                   : null,
-                /* 音量：神经模型不支持 */
-                !isNeural
+                /* 音量：神经模型与 GPT-SoVITS 外部服务不支持 */
+                !isNeural && !isSovits
                   ? React.createElement(
                       Label,
                       null,
@@ -3846,11 +3962,13 @@ window.__ModuleLoader__.load({
             React.createElement(
               'div',
               { style: { fontSize: 12, marginBottom: 8, opacity: 0.85 } },
-              `${t('ttsCurrent')}: ${engine === 'neural'
-                ? (readyNeural.find((x) => x.id === config.neuralModel)?.label ?? t('neuralNoModel'))
-                : engine === 'local'
-                  ? (voiceLabel(config.localVoice ?? '') || t('localVoiceDefault'))
-                  : (voiceLabel(config.voice ?? '') || (config.voice ?? ''))}`,
+              `${t('ttsCurrent')}: ${engine === 'sovits'
+                ? `GPT-SoVITS (${config.sovitsUrl ?? 'http://127.0.0.1:9880'})`
+                : engine === 'neural'
+                  ? (readyNeural.find((x) => x.id === config.neuralModel)?.label ?? t('neuralNoModel'))
+                  : engine === 'local'
+                    ? (voiceLabel(config.localVoice ?? '') || t('localVoiceDefault'))
+                    : (voiceLabel(config.voice ?? '') || (config.voice ?? ''))}`,
             ),
             ...[
               { key: 'asr', title: t('modelGroupAsr'), list: asrModels },

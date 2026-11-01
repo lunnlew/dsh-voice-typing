@@ -12,6 +12,7 @@
 | `lib/edge-tts.js` | Edge 在线 TTS：共享连接 + 互斥锁 + 预热 |
 | `lib/local-tts.js` | 本地 TTS：调用 Windows SAPI（PowerShell）/ macOS say / espeak-ng，完全离线 |
 | `lib/neural-tts.js` | 本地神经 TTS（sherpa-onnx VITS）宿主侧封装：工作线程收发、预加载与释放、WAV 编码 |
+| `lib/sovits-tts.js` | **外部 GPT-SoVITS 引擎客户端**：按官方 `api_v2` 的 `/tts` 契约转发文本（含用户配置的参考音频/文本/语言），拿回 wav；不内置模型、不做克隆、失败不回退 |
 | `lib/tts-worker.js` | 本地神经 TTS 工作线程（VITS 推理） |
 | `lib/tts-env.js` | 合成运行环境自检（引擎可用性、平台能力） |
 | `src/client/pure/*.js` | 浏览器侧纯函数源码（门限 / 草稿 / 信封 / 朗读积压 / 定时器），由脚本内联进 `lib/client.js` |
@@ -131,6 +132,11 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
 **直接终止进程**（整个桌面应用退出）——不是抛异常，宿主连错误都接不住。
 
 ### 5. TTS 三引擎
+
+> **外部 GPT-SoVITS 引擎**（2026-11 追加）：插件不内置 GPT-SoVITS、不做声音克隆；用户自己跑官方
+> `api_v2` 服务（默认 `127.0.0.1:9880`），插件只把每句文本 POST 到 `/tts`（携带用户配置的
+> `ref_audio_path` / `prompt_text` / 语言），拿回 wav 走现有播放管线。失败**不回退**其它引擎
+> （隐私 + 音色一致性），超时 20s < 客户端 25s，失败计数进 `/diagnostics.sovitsTts`。
 - **online**：Edge 云端，音质好，~600ms（预热后）
 - **neural**：本地 VITS 模型，离线可用，~1.6s
 - **local**：Windows SAPI / macOS say / espeak-ng，离线可用，~800ms
@@ -409,7 +415,7 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
 ## 回归测试
 
 ```bash
-npm test             # 38 个测试文件（不连宿主；先跑 bundle-sync + client-behavior）
+npm test             # 39 个测试文件（不连宿主；先跑 bundle-sync + client-behavior）
 npm run build:client # 把 src/client/pure/ 内联进 lib/client.js
 npm run check:client # 只校验产物是否最新（CI 用）
 npm run test:silence -- http://127.0.0.1:<端口>   # 静音与流式识别回归（需要宿主在运行）

@@ -177,8 +177,11 @@ dsh plugin --profile desktop add dsh-voice-typing
 | --- | --- | --- |
 | **朗读回复** | 总开关。关掉则下面所有朗读参数都不生效 | 勾选即朗读，**不需要**开语音模式 |
 | **朗读追赶最新** | 生成远快于朗读时，允许落后屏幕多少秒；超过就整段跳旧段、**保留最新 3 段**（从最新第 3 条开始读，不从段落中间开始念） | 默认 `7.5` 秒（0.5 秒步进）；`0` = 全部朗读、不跳段（长回复会越读越滞后）；>120 按 120 秒生效 |
-| **语音引擎** | 用哪种方式念 | `Edge 在线` / `本地神经模型` / `本地系统语音`，见下方对比 |
+| **语音引擎** | 用哪种方式念 | `Edge 在线` / `本地神经模型` / `本地系统语音` / `GPT-SoVITS 外部服务`，见下方对比 |
 | **朗读音色** | 用哪个发音人 | 在线用 Edge 音色（`zh-CN-XiaoxiaoNeural` 等）；本地用系统语音；神经模型用「说话人」 |
+| **GPT-SoVITS 服务地址** | 外部 GPT-SoVITS 服务地址 | 默认 `http://127.0.0.1:9880`；根地址或 `/tts` 均可 |
+| **服务端参考音频路径** | 官方 api_v2 必填 | GPT-SoVITS 所在机器上可访问的 wav 路径（插件只透传） |
+| **参考音频文本/语言、合成语言** | 参考音色与多语种 | 参考文本与音频逐字匹配效果最好；语言 zh/en/ja/ko/yue |
 | **朗读语速** | 快慢 | `+0%` 为正常，`+50%` 更快，`-50%` 更慢 |
 | **朗读音调** | 高低 | 只有在线 Edge 支持（如 `+0Hz`、`-5Hz`） |
 | **朗读音量** | 大小 | 在线与本地支持（如 `+0%`），神经模型不支持 |
@@ -191,8 +194,28 @@ dsh plugin --profile desktop add dsh-voice-typing
 | **Edge 在线** | ★★★ | 需要 | 快（预热后 ~600ms） | 音质最好，音色选择多 |
 | **本地神经模型** | ★★☆ | 离线 | 中（~1.6s） | 比系统语音自然；需下载约 170MB 模型 |
 | **本地系统语音** | ★☆ | 离线 | 最快（~800ms） | 机器感较强；Windows SAPI / macOS say / Linux espeak |
+| **GPT-SoVITS 外部服务** | 取决于你的服务与模型 | 本机 HTTP | 取决于服务端（GPU 快） | 用户自己跑 GPT-SoVITS `api_v2`；插件只转发文本合成，不内置模型、不做克隆 |
 
 > 在线引擎合成失败时**自动回退到本地**，保证「总有声音」。
+> GPT-SoVITS 外部服务**不回退**（避免把文本发给微软、也避免偷偷换音色），失败见 `/diagnostics` 的 `sovitsTts`。
+
+**外部 GPT-SoVITS 引擎（可选）**
+
+插件**不内置** GPT-SoVITS、也**不做声音克隆**：需要你自己运行官方 `api_v2` 服务，
+把服务端可访问的参考音频/参考文本/语言填到设置里；插件只把每句文本 POST 到 `/tts`，
+拿回 wav 走现有播放管线。
+
+1. 在 GPT-SoVITS 目录启动 API 服务：
+   `python api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS/configs/tts_infer.yaml`
+2. 设置 → 语音引擎选「GPT-SoVITS 外部服务」，填：
+   - **服务地址**（默认 `http://127.0.0.1:9880`，填根地址或 `/tts` 都行）；
+   - **服务端参考音频路径**（官方 api_v2 **每个请求**都要求它，必须是服务端机器上可访问的 wav）；
+   - **参考音频文本 / 语言**（可选；与参考音频逐字匹配时音质更好）；
+   - **合成语言**（zh / en / ja / ko / yue）。
+3. 模型/音色/参考音频都由 GPT-SoVITS 侧管理，插件不下载模型、不克隆声音。
+
+> 服务未启动或参考音频路径不对时，`/tts` 会返回可读错误（含官方 `api_v2` 的 message 与提示），
+> 计数进 `/diagnostics.sovitsTts`；插件**不会**替你拉起 Python 服务。
 
 ---
 
@@ -320,7 +343,7 @@ dsh plugin --profile desktop add dsh-voice-typing
    - `本地系统语音` 在当前平台需支持（Windows SAPI / macOS say / Linux espeak-ng）。
    - `本地神经模型` 需要**已下载**该档位模型（见 [6.3](#63-怎么下载)）。
 3. 打开浏览器控制台，输入 `__DSH_VOICE_DEBUG__()` 看 `ttsFailures`。
-4. 若显示「朗读失败」，看 [诊断接口](#94-诊断接口)里的 `onlineTts` / `localTts` / `neuralTts` 的 `lastError`。
+4. 若显示「朗读失败」，看 [诊断接口](#94-诊断接口)里的 `onlineTts` / `localTts` / `neuralTts` / `sovitsTts` 的 `lastError`。
 5. 若本地引擎失败但显示「朗读中」却没声，多半是自动回退到在线但**没联网**。
 
 ### 8.6 朗读不完整 / 句子被切碎 / 把代码念出来
@@ -437,6 +460,7 @@ Silero VAD 切段（灵敏度 0.5 / 最短语音 0.25 s / 静音断句 0.5 s / �
 | `lib/edge-tts.js` | Edge 在线朗读（共享连接 + 串行锁） |
 | `lib/local-tts.js` | 跨平台系统语音（Windows SAPI / macOS say / Linux espeak-ng） |
 | `lib/neural-tts.js` | 本地神经 TTS 的宿主侧封装（线程管理、预加载、释放） |
+| `lib/sovits-tts.js` | **外部 GPT-SoVITS 引擎客户端**：把每句文本 POST 到用户自己的 `api_v2` 服务；不内置模型、不做克隆、失败不回退 |
 | `lib/model-catalog.js` | 模型档位定义、并行分片下载、缓存、SHA256 校验 |
 | `lib/text-rules.js` | 词表解析、替换、语气词清理、输出规范化 |
 | `lib/read-aloud-policy.js` | **朗读发射规则**（纯函数）：时间窗口、单句上限、`splitLongText`（切成完整句子，绝不断成半句）、`packWindowSentences`（一批取几句，不合并成长文本） |
@@ -543,6 +567,19 @@ Silero VAD 切段（灵敏度 0.5 / 最短语音 0.25 s / 静音断句 0.5 s / �
 - `turn-end`（协议 v3）表示**真正的一轮结束**；`call-end` 表示**一次** `llm/stream` 调用结束。
 - 回合状态表**不会无限增长**：用空闲超时兜底 —— `turnModel.prune()` 每 60 秒
   清掉超过 10 分钟没活动的会话的回合状态。
+
+#### 外部 GPT-SoVITS：只做转发，不内置、不克隆、不回退
+
+GPT-SoVITS 是 PyTorch 推理体系（官方只提供 `api_v2.py` HTTP 服务），没有能在 Electron 里直接跑的 ONNX 管线。
+所以插件把它当成**外部 TTS 引擎**：
+
+- 插件不管理模型/参考音频、不做声音克隆，只按官方 `/tts` 契约转发 `text`/`text_lang`/`prompt_lang`
+  （以及用户配置的 `ref_audio_path`/`prompt_text`），拿回 wav；
+- **失败绝不回退** Edge/系统语音：用户选它就是要自己的声音与隐私，不能偷偷把文本发给微软、也不能换音色；
+- 宿主超时（`SOVITS_TIMEOUT_MS=20s`）必须小于客户端单句超时（25s），否则客户端先放弃、错误只剩「没声音」；
+- 失败计入 `/diagnostics.sovitsTts`（`failures`/`lastError`/`lastAt`）。
+
+回归：`test/sovits-tts.test.mjs`（契约/URL 规范化/失败/超时/不回退 + 宿主接线 + 构建产物 UI）。
 
 #### 朗读失败不静默（可观测性）
 
@@ -779,7 +816,7 @@ Silero VAD 切段（灵敏度 0.5 / 最短语音 0.25 s / 静音断句 0.5 s / �
 
 #### 改动之后
 
-- `npm test` 必须全绿（38 个文件；先跑 `bundle-sync` 校验产物同步，再跑 `client-behavior` 行为回归）。
+- `npm test` 必须全绿（39 个文件；先跑 `bundle-sync` 校验产物同步，再跑 `client-behavior` 行为回归）。
 - 需要连活插件的集成测试单独跑：`npm run test:silence -- http://127.0.0.1:<端口>`。
 - 需要跑「真加载模型」的慢集成（SenseVoice 预加载等）：`$env:DSH_VT_SLOW_TESTS=1; npm test`。
   默认套件走快速路径并显式打印 ⏭ 跳过，不会悄悄漏测。
