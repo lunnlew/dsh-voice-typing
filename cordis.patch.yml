@@ -1,0 +1,50 @@
+# dsh-voice-typing 的 bundle patch —— 插入语音输入插件行。
+#
+# 宿主侧（lib/index.js）加载 dsh-voice-typing，路由清单：
+#   POST /dsh-voice-typing/transcribe    录音 → 文字
+#   POST /dsh-voice-typing/asr-stream?sessionId=…   边喂边出字（实时文字）
+#   POST /dsh-voice-typing/asr-stream/reset?sessionId=…  结束流式并丢弃状态
+#   GET  /dsh-voice-typing/tts?text=…   文字 → 音频（在线 Edge / 本地系统语音 / 本地神经模型）
+#   GET  /dsh-voice-typing/voices?engine=…             音色列表
+#   GET  /dsh-voice-typing/tts/env       合成运行环境自检
+#   GET  /dsh-voice-typing/tts/warmup    预热在线 TTS 连接（本地引擎无连接概念）
+#   GET  /dsh-voice-typing/latest-message?sessionId=…   本轮 assistant 回复全文（保留备用，客户端未调用）
+#   GET  /dsh-voice-typing/busy          助手是否正在生成（降级用，首选是 assistant-busy 事件）
+#   GET  /dsh-voice-typing/diagnostics   诊断数据（统计、忙状态、下载进度）
+#   POST /dsh-voice-typing/voice-session 客户端心跳上报（诊断用）
+#   GET  /dsh-voice-typing/config       当前生效配置
+#   POST /dsh-voice-typing/config       保存配置
+#   GET  /dsh-voice-typing/models       模型档位清单与本地状态
+#   POST /dsh-voice-typing/model        下载/准备指定档位
+#   GET  /dsh-voice-typing/stream       SSE：turn-begin / turn-end / sentence / assistant-busy /
+#                                          model-progress / model-ready / model-error
+#
+# 浏览器侧由 package.json 的 dsh.client 声明 + exports["./client"] 自动发现，
+# 在输入框右侧注册麦克风按钮（点一下切换语音模式，不是按住说话）。
+#
+# 识别在本插件内用 sherpa-onnx 完成，默认档 SenseVoice 直接复用 DSH 已装好的
+# 本地模型（~/.dsh/speech-to-text），零下载、零密钥、离线可用。
+#
+# 可选 config：
+#
+# - id: dsh-voice-typing
+#   name: 'dsh-voice-typing'
+#   config:
+#     model: sensevoice        # 识别模型档位：sensevoice / whisper-* / zipformer2-zh
+#     language: auto           # 识别语言提示：auto / zh / en / yue / ja / ko
+#     voice: zh-CN-XiaoxiaoNeural   # Edge TTS 音色
+#     rate: '+10%'             # 语速（在线/本地/神经三个引擎都支持）
+#     autoSend: true           # 识别后自动发送
+#     liveAsr: full            # 实时字方式：full 整段重识别 / stream 流式解码 / auto 自动
+#     readAloud: false         # 是否朗读回复
+#     mode: toggle             # 交互模式：toggle 连续对话 / once 说完就关
+#     silenceMs: 1500          # 静音断句时长（毫秒）
+#     removeFillers: false     # 清理语气词
+#     preloadModels: true      # 启用后后台预加载模型（首次说话不用等加载）
+#     idleReleaseMinutes: 10   # 模型闲置多少分钟后自动释放（0 = 永不释放）
+#
+# 自定义词表与其它设置在设置面板里编辑，落盘 ~/.dsh/voice-typing.json。
+- insert:
+    - id: dsh-voice-typing
+      name: 'dsh-voice-typing'
+      config: {}
