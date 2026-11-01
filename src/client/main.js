@@ -545,6 +545,9 @@ window.__ModuleLoader__.load({
 
     /* @bundle pure/backlog.js */
 
+
+    /* @bundle pure/highlight.js */
+
     const configStore = {
       value: { ...DEFAULT_CONFIG },
       listeners: new Set(),
@@ -568,6 +571,225 @@ window.__ModuleLoader__.load({
         listener(this.value)
         return () => this.listeners.delete(listener)
       },
+    }
+
+    /**
+     * 朗读高亮覆盖层控制器。
+     *
+     * 完全不碰消息 DOM（见组件里 `readingHighlightRef` 处的说明）。
+     * 纯函数 `matchInNodes` 只做字符串对齐，这里负责：
+     *   定位当前回复容器 → 收集文本节点 → 找命中区间 → 建 Range →
+     *   取矩形 → 在 fixed 覆盖层里画半透明色块。
+     *
+     * @param {object} win - 浏览器 window（注入以便在其它环境里复用/测试）。
+     * @returns {{ set(text: string): void, clear(): void, dispose(): void }}
+     */
+    function createReadingHighlight(win) {
+      const doc = win.document
+      const STYLE_ID = 'dsh-voice-reading-style'
+      /** 覆盖层：fixed、盖满视口、不拦截事件，色块放它里面。 */
+      let layer = null
+      /** 是否在活跃（正在朗读）。 */
+      let active = false
+      /** 当前要高亮的句子文本（已还原、未归一化）。 */
+      let currentText = ''
+      /** 节流用的 rAF 句柄。 */
+      let raf = 0
+      /** 绑定到 window 的滚动/缩放监听（活跃时才挂）。 */
+      let boundScroll = null
+
+      /** 最近一次 render 的诊断结果（挂到 __DSH_VOICE_DEBUG__ 里排查「为什么没高亮」）。 */
+      const diag = {
+        active: false,
+        target: '',
+        containerCount: 0,
+        foundContainer: false,
+        matchCount: -1,
+        rectCount: 0,
+        layerChildren: 0,
+        error: '',
+      }
+
+      const ensureStyle = () => {
+        if (doc.querySelector(`style[data-plugin-css="${STYLE_ID}"]`)) return
+        const tag = doc.createElement('style')
+        tag.dataset.pluginCss = STYLE_ID
+        tag.textContent = [
+          `[data-voice-reading]{position:absolute;pointer-events:none;background:rgba(255,214,0,.32);border-radius:2px;}`,
+          `[data-voice-reading-overlay]{position:fixed;inset:0;pointer-events:none;z-index:2147483647;}`,
+        ].join('\n')
+        doc.head.appendChild(tag)
+      }
+
+      const ensureLayer = () => {
+        if (layer && layer.isConnected) return layer
+        layer = doc.createElement('div')
+        layer.setAttribute('data-voice-reading-overlay', '')
+        doc.body.appendChild(layer)
+        return layer
+      }
+
+      const clear = () => {
+        if (layer) layer.textContent = ''
+      }
+
+      /** 收集容器里非空的文本节点（按文档顺序）。 */
+      const collectTextNodes = (root) => {
+        const nodes = []
+        const walker = doc.createTreeWalker(root, win.NodeFilter.SHOW_TEXT, {
+          acceptNode: (node) => {
+            const v = node.nodeValue
+            return v && v.trim() !== '' ? win.NodeFilter.FILTER_ACCEPT : win.NodeFilter.FILTER_REJECT
+          },
+        })
+        let node
+        while ((node = walker.nextNode())) nodes.push(node)
+        return nodes
+      }
+
+      /**
+       * 定位当前回复容器。
+       *
+       * 实测（2026-11-01）发现：**正在流式输出的助手回复并不在
+       * `[data-step-process-content]` 里**，而是在
+       * `[data-chat-flow-kind="assistant-step"]`（更精确）或外层
+       * `[data-chat-flow]` / `[data-slot="conversation.chat.flow"]` 里。
+       * 只搜 `[data-step-process-content]` 会漏掉「当前正在朗读的那一句」，
+       * 于是 foundContainer=false、什么都不高亮。
+       *
+       * 所以这里搜三类候选，凡是归一化后包含目标句的都收进来，
+       * 然后取 **textContent 最短**（最深层、最精确）的那个容器。
+       * 这样：新回复命中 assistant-step；已归档回复命中
+       * data-step-process-content；都能拿到精确的矩形。
+       *
+       * @param {string} targetNorm - 已归一化的目标句。
+       * @returns {Element|null}
+       */
+      const findContainer = (targetNorm) => {
+        const sel = [
+          '[data-step-process-content]',
+          '[data-chat-flow-key][data-chat-flow-kind="assistant-step"]',
+          '[data-chat-flow]',
+          '[data-slot="conversation.chat.flow"]',
+        ].join(',')
+        const candidates = doc.querySelectorAll(sel)
+        let best = null
+        let bestLen = Infinity
+        for (const el of candidates) {
+          const txt = collapseWhitespace(el.textContent ?? '')
+          if (txt.includes(targetNorm) && txt.length < bestLen) {
+            best = el
+            bestLen = txt.length
+          }
+        }
+        return best
+      }
+
+      /** 画一个矩形色块（视口坐标 → fixed 层内的绝对定位）。 */
+      const drawRect = (rect) => {
+        if (!rect || rect.width === 0 || rect.height === 0) return
+        const span = doc.createElement('span')
+        span.setAttribute('data-voice-reading', '')
+        span.style.left = `${rect.left}px`
+        span.style.top = `${rect.top}px`
+        span.style.width = `${rect.width}px`
+        span.style.height = `${rect.height}px`
+        layer.appendChild(span)
+      }
+
+      /** 从矩形集合画色块。 */
+      const drawRects = (rects) => {
+        clear()
+        for (const rect of rects) drawRect(rect)
+      }
+
+      /** 重算当前句的矩形并重画（滚动/重排时也调用）。 */
+      const render = () => {
+        raf = 0
+        if (!active || !currentText) return
+        diag.active = true
+        diag.target = currentText
+        diag.error = ''
+        const targetNorm = collapseWhitespace(unescapeSpeechText(currentText))
+        if (!targetNorm) { clear(); diag.error = 'empty-target'; return }
+        const container = findContainer(targetNorm)
+        diag.containerCount = doc.querySelectorAll('[data-step-process-content],[data-chat-flow-key][data-chat-flow-kind="assistant-step"],[data-chat-flow],[data-slot="conversation.chat.flow"]').length
+        diag.foundContainer = !!container
+        if (!container) {
+          clear()
+          diag.error = 'no-container'
+          win.console.debug(`[dsh-voice-typing] 高亮：找不到含目标句的容器（共 ${diag.containerCount} 个候选），target="${targetNorm.slice(0, 40)}"`)
+          return
+        }
+        const textNodes = collectTextNodes(container)
+        const ranges = matchInNodes(textNodes.map((n) => n.nodeValue), targetNorm)
+        diag.matchCount = ranges ? ranges.length : 0
+        if (!ranges) {
+          win.console.debug(`[dsh-voice-typing] 高亮：目标句在容器内匹配不上，降级为整段高亮。target="${targetNorm.slice(0, 40)}"`)
+        }
+        if (!ranges || !ranges.length) {
+          // 整句匹配不上（跨块/软换行错位）→ 降级：整段浅高亮。
+          const rect = container.getBoundingClientRect()
+          drawRects([rect])
+          diag.rectCount = rect.width && rect.height ? 1 : 0
+          diag.layerChildren = layer ? layer.children.length : 0
+          return
+        }
+        try {
+          const range = doc.createRange()
+          const first = ranges[0]
+          const last = ranges[ranges.length - 1]
+          range.setStart(textNodes[first.nodeIndex], first.start)
+          range.setEnd(textNodes[last.nodeIndex], last.end)
+          drawRects(range.getClientRects())
+          diag.rectCount = layer ? layer.children.length : 0
+        } catch (err) {
+          diag.error = String(err)
+          /* 节点被 React 移除等异常：忽略，下次 render 再试 */
+        }
+      }
+
+      const scheduleRender = () => {
+        if (raf) return
+        raf = win.requestAnimationFrame(render)
+      }
+
+      const set = (text) => {
+        ensureStyle()
+        ensureLayer()
+        active = true
+        currentText = String(text ?? '')
+        scheduleRender()
+        if (!boundScroll) {
+          boundScroll = () => scheduleRender()
+          win.addEventListener('scroll', boundScroll, true)
+          win.addEventListener('resize', boundScroll)
+        }
+      }
+
+      const clearReading = () => {
+        active = false
+        currentText = ''
+        diag.active = false
+        clear()
+        if (raf) { win.cancelAnimationFrame(raf); raf = 0 }
+        if (boundScroll) {
+          win.removeEventListener('scroll', boundScroll, true)
+          win.removeEventListener('resize', boundScroll)
+          boundScroll = null
+        }
+      }
+
+      const dispose = () => {
+        clearReading()
+        if (layer) { layer.remove(); layer = null }
+        const style = doc.querySelector(`style[data-plugin-css="${STYLE_ID}"]`)
+        if (style) style.remove()
+      }
+
+      const getState = () => ({ ...diag })
+
+      return { set, clear: clearReading, dispose, getState }
     }
 
     /**
@@ -805,9 +1027,34 @@ window.__ModuleLoader__.load({
         try { cancel?.() } catch { /* 忽略 */ }
         speakingRef.current = false
         setSpeaking(false)
+        // 朗读被打断/停止/新一轮：同步清掉高亮。
+        readingHighlightRef.current?.clear()
       }, [])
       /** 我们最后一次写进草稿的内容：用来区分「我们的残留」和「用户自己打的字」。 */
       const lastWrittenRef = useRef('')
+
+      /* ================= 朗读高亮（覆盖层，不碰消息 DOM） ================= */
+
+      /**
+       * 「正在朗读的文本」高亮控制器。
+       *
+       * 为什么用**覆盖层**而不是给消息里的文本节点包 `<mark>`：
+       *   消息是 React 渲染的。给 React 管理的文本节点 `splitText()` 再插入
+       *   我们自己的元素，会留下 React 不知道的孤儿节点 —— 一旦 React 因为
+       *   流式更新重渲染那条消息（朗读期间内容仍在增长），它只更新自己引用
+       *   的文本节点，我们插进去的高亮节点就成了**残留**，表现为文字重复、
+       *   消息流被弄乱 —— 正是需求里「不影响消息流」要避免的。
+       *
+       *   所以这里**完全不碰消息 DOM**：用 `Range.getClientRects()` 拿到
+       *   命中文本的**视口矩形**，在 `position:fixed` 的覆盖层里画几个
+       *   半透明色块垫在文字下面。文字节点一个都不动，React 完全不受影响。
+       *
+       *   覆盖层是 `fixed`，滚动/缩放会错位，所以滚动时用 rAF 节流重算矩形。
+       */
+      const readingHighlightRef = useRef(null)
+      if (!readingHighlightRef.current) {
+        readingHighlightRef.current = createReadingHighlight(window)
+      }
 
       // 定时器登记表：本组件所有定时器都登记在这里，
       // 状态复位时按 group 清，卸载时全清。
@@ -1001,6 +1248,9 @@ window.__ModuleLoader__.load({
           audioError: playCtxError,
           // 最近一次朗读失败的具体原因（HTTP 状态码 + 服务端错误正文）。
           lastTtsError,
+          // 朗读高亮的诊断（排查「明明在朗读、界面上却没有高亮」）。
+          // 字段含义见 createReadingHighlight 里的 diag。
+          readingHighlight: readingHighlightRef.current?.getState?.() ?? null,
         })
         return () => {
           try { delete window.__DSH_VOICE_DEBUG__ } catch { /* 忽略 */ }
@@ -1479,7 +1729,13 @@ window.__ModuleLoader__.load({
               // 不按代次过滤：已经排队的句子都要念出去。
               // 之前这里会丢弃 gen 不符的句子，而回合开始事件每次 LLM 调用都触发，
               // 结果大量内容被静默丢弃 —— 用户听到的就是「很多没播报」。
-              inflight.push({ promise: synth(item.sentence, item.gen), gen: item.gen, index: item.index })
+              // 保留 sentence：播放到这句时要据此高亮「正在朗读的文本」。
+              inflight.push({
+                promise: synth(item.sentence, item.gen),
+                gen: item.gen,
+                index: item.index,
+                sentence: item.sentence,
+              })
             }
           }
           /**
@@ -1516,7 +1772,7 @@ window.__ModuleLoader__.load({
                   continue
                 }
               }
-              const { promise, gen } = inflight.shift()
+              const { promise, gen, sentence } = inflight.shift()
               // 合成要有超时兜底：宿主 /tts 挂住时（网络 stall、宿主忙、
               // 后台节流）若没有超时，await 永不 resolve → 整个朗读管道
               // 卡死（pumpingRef 卡 true，之后所有句子只入队不播）。
@@ -1526,7 +1782,12 @@ window.__ModuleLoader__.load({
                 sleep(window, TTS_TIMEOUT_MS).then(() => null),
               ])
               // 合成失败的句子跳过，但不影响后面的句子
-              if (decoded) await play(decoded, gen)
+              if (decoded) {
+                // 正在朗读的文本 → 高亮。放在 play 之前，让「朗读中」
+                // 与「高亮」严格同步；这一句播完、进入下一句时再覆盖。
+                readingHighlightRef.current?.set(sentence)
+                await play(decoded, gen)
+              }
               trimPending()
             }
           } finally {
@@ -1542,6 +1803,8 @@ window.__ModuleLoader__.load({
           } else {
             speakingRef.current = false
             setSpeaking(false)
+            // 队列空了，没有正在朗读的文本了 → 清高亮。
+            readingHighlightRef.current?.clear()
           }
         }
       }, [])
@@ -2151,6 +2414,8 @@ window.__ModuleLoader__.load({
           // 之前是逐个 ref 清，漏一个就是一个「组件卸载后还在跑」的定时器。
           timers.clearAll()
           stopAll()
+          // 卸载时把高亮覆盖层连根清掉（移除色块与样式）。
+          readingHighlightRef.current?.dispose()
           // 提示定时器也要清：不清的话组件卸载后它还会触发一次 setHintState
           if (hintTimerRef.current) {
             window.clearTimeout(hintTimerRef.current)
@@ -2194,6 +2459,9 @@ window.__ModuleLoader__.load({
                 ttsFailures: ttsFailuresRef.current,
                 playSkipped: playSkippedRef.current,
                 lastTtsError,
+                // 朗读高亮诊断：让我能在宿主 /diagnostics 里直接看到
+                // 「为什么没高亮」（找不到容器 / 匹配数 / 矩形数 / 异常）。
+                readingHighlight: readingHighlightRef.current?.getState?.() ?? null,
               },
             }),
           }).catch(() => {})

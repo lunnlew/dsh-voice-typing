@@ -72,13 +72,17 @@ for (const [fn, file] of [
   ['belongsToSession', 'pure/envelope.js'],
   ['createTimerRegistry', 'pure/envelope.js'],
   ['sleep', 'pure/envelope.js'],
+  ['unescapeSpeechText', 'pure/highlight.js'],
+  ['normalizeRun', 'pure/highlight.js'],
+  ['collapseWhitespace', 'pure/highlight.js'],
+  ['matchInNodes', 'pure/highlight.js'],
 ]) {
   const count = (bundled.match(new RegExp(`function ${fn}\\b`, 'g')) || []).length
   check(`${fn} 在产物里恰好定义一次（来自 ${file}）`, count === 1, `实际 ${count} 处`)
 }
 
 console.log('\n源文件是纯的（能在 Node 里原生 import）')
-for (const f of ['pure/gate.js', 'pure/draft.js', 'pure/envelope.js']) {
+for (const f of ['pure/gate.js', 'pure/draft.js', 'pure/envelope.js', 'pure/highlight.js']) {
   const raw = fs.readFileSync(`${root}/src/client/${f}`, 'utf8')
   // 剥离注释后再检查 —— 注释里提到 window 是正常的
   const code = raw
