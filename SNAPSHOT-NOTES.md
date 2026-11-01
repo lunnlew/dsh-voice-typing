@@ -1,6 +1,6 @@
 # dsh-voice-typing 代码快照说明
 
-生成时间：2026-10-31 18:30
+生成时间：2026-11-01 18:36（追赶策略定稿：7.5s 预算 / 保留最新 3 段 / 生成快时首句 skim）
 
 ## 文件结构
 
@@ -19,7 +19,10 @@
 | `lib/turn-model.js` | 回合判定模型（`createTurnModel` 工厂）：判定新一轮、分配 turnId、句子序号、空闲清理 |
 | `lib/sse-envelope.js` | SSE 事件信封协议层：`EVENT_PROTOCOL_VERSION`、全局事件序号、`buildEventEnvelope` |
 | `lib/speech-clean.js` | 文本清洗与分句：`stripForSpeech`（Markdown → 纯文本）、`splitSentenceParts`、`findSentenceBreak` |
-| `lib/read-aloud-policy.js` | **朗读发射规则**（纯函数）：时间窗口 `EMIT_WINDOW_MS`、单句上限、`splitLongText`（完整句子切分，绝不断成半句）、`packWindowSentences`（一批取几句，不合并成长文本） |
+| `lib/read-aloud-policy.js` | **朗读切句/发射规则**（纯函数）：`splitLongText`（完整句子切分，绝不断成半句）、`packWindowSentences`（相邻短句合成 ≤ 上限的片段）、`MAX_SENTENCE_CHARS`；`EMIT_WINDOW_MS` 仅用于「收不到 ack 的老客户端」降级节奏 |
+| `lib/paragraph.js` | **自然段落切分**（纯函数）：空行 / 列表项 / 标题 / 引用为段落边界；`splitParagraphs` 支持流式累积（末尾未完成段进 `rest`） |
+| `lib/read-aloud-scheduler.js` | **朗读调度器**：按自然段落收集、按客户端 ack 的播放进度发句（流控）；追赶最新（超预算整段跳旧段、保留最新 3 段）；生成很快时 skim（每段只读首句）；无 ack 时降级为旧的 400ms 时间窗口节奏 |
+| `lib/fence-filter.js` | **流式代码围栏过滤器**（纯函数）：跨 chunk 识别 ``` / ~~~ 围栏；围栏标记被 chunk 边界切开也不会漏代码 / 丢正文 |
 | `lib/model-catalog.js` | 模型档位目录与下载缓存（识别 + 神经 TTS 档位、分片并行下载、SHA256 校验） |
 
 ## 核心数据流
@@ -50,20 +53,29 @@
 
 ### 朗读（边生成边朗读）
 ```
-助手流式输出 → llm/stream 钩子过滤代码块 → 句子进队列
-  → 时间窗口定时器每 400ms 取一句 → 广播 sentence 事件（SSE）
-  → 客户端入队 → 3 路并行合成（Edge 或本地）→ 顺序播放
+助手流式输出 → llm/stream 钩子过滤代码块 → 正文喂给 lib/read-aloud-scheduler.js
+  → 调度器按自然段落收集、段内按句末标点切句
+  → 积压（待朗读音频估算时长）超过 readAloudLag（默认 7.5s，0=关闭）→ 整段跳旧段、保留最新 3 段（从最新第 3 条开始读）
+  → 生成中且超预算时「每段只读首句」就跳走（不再等整段读完）；生成结束后恢复正常完整朗读
+  → 按客户端播放进度发句（客户端每开始播一句回 POST /reading-ack）
+      · 已发未确认句数上限 READ_ALOUD_LEAD=3
+      · 没有 ack（老客户端）→ 降级为旧的 400ms 时间窗口节奏
+  → 广播 sentence 事件（SSE，带 turnId/index/para/paraStart）
+  → 客户端按 (turnId,index) 去重 → 3 路并行合成 → 顺序播放 → 开始播一句就 ack 一句
   → 你说话 → 停朗读；新一轮开始（turn-begin）→ haltSpeaking() 停旧朗读
 ```
 
 两条硬规则（详见 README「朗读切分」「朗读发送节奏」两节）：
 
-- **代码块（```…```）一律不朗读**：按 text-delta 逐块切分 + `inFence` 状态机，
-  代码内容一个字都不进 buffer。不能先拼 buffer 再判断 —— 流式时围栏和代码
-  不在同一块里到达，代码早被切成句子念出去了。
-- **按时间窗口取句子**：请求速率上限 = `1 / EMIT_WINDOW_MS`，
-  与文本涌入速度无关。首句不排队（立刻发），流结束时剩余句子一次性发完。
-  窗口**不合并**成长文本 —— 一批仍是「一句一段」。
+- **代码块（```…```）一律不朗读**：按 text-delta 逐块过滤 + `lib/fence-filter.js` 的
+  跨 chunk 围栏状态机（`~~~` 围栏要求行首），代码内容一个字都不进朗读队列。
+  不能先拼 buffer 再判断 —— 流式时围栏和代码不在同一块里到达，而且围栏标记本身
+  也可能被 chunk 边界切开（"``" + "`js"），旧实现会在这种切法下把代码念出来、
+  把围栏后的正文当代码丢掉。
+- **按客户端播放进度发句（流控）+ 追赶最新**：`READ_ALOUD_LEAD=3`（已发未确认上限），
+  客户端每开始播一句回 `/reading-ack`，宿主才补发；积压超过 `readAloudLag` 就按整段
+  保留最新 3 段。没有 ack（老客户端）时降级为旧的 400ms 时间窗口节奏，收尾等 1.2s
+  grace 后一次发完（不丢尾巴）。
 - **列表编号不当句子念**：`1. 第一步…` 的 `1.` 曾被当成一句「一」读出来。
   `splitSentenceParts` 排除列表编号作为句界，`stripForSpeech` 去掉
   `1.` / `1)` / `一、` / `-` 等前缀（但 `1.5 倍速` 这类正文必须保留）。
@@ -291,6 +303,68 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
 `npm run build:client`。
 
 
+### 7.8 朗读节奏：从「固定时间窗口」改为「客户端播放进度流控」（用户两次反馈后重做）
+
+用户反馈（2026-11-01，第二次）：
+「不是按自然段落读的，总挑到最新段落里非首句的句子」；
+「已经念到后面了，又回去念前面的」。
+
+**根因不是切分算法，是生产/消费速率失衡**：
+- 宿主旧逻辑按 `EMIT_WINDOW_MS=400ms` 一句猛发（2.5 句/秒）；
+- 浏览器真正「念」受音频播放时长限制（2~3 秒/句）；
+- 生产速度是消费速度的 5~8 倍 → 客户端积压 + `trimBacklog` 丢「最旧的可丢项」
+  = **丢掉接下来马上要播的那几句** → 播放位置不断向前跳，落点在段落中间
+  → 「不是按自然段落朗读」的听感。（现在 `MAX_PENDING=8`，且只作安全网：
+  按整段丢弃、保护正在播的段 / 首段 / 最新段，可丢的组都在受保护组之后时
+  宁可不丢＝软上限。）
+- 旧实现里段落补全时用字符串 `startsWith(curParaSent)` 减前缀、**没有兜底**：
+  一旦不匹配就把整个段落（含已发句子）当新段落再发一遍 → 「读完后面又回去读前面」。
+
+**新设计**（唯一实现 `lib/read-aloud-scheduler.js`）：
+- 段落是朗读单元：段落内句子全部发出后才轮到下一段（`splitParagraphs` + 段内切句）；
+- **流控**：宿主维护「已发未确认」句数，上限 `READ_ALOUD_LEAD=3`；
+  客户端每**开始播放**一句就 `POST /dsh-voice-typing/reading-ack`（`{sessionId,turnId,count}`），
+  宿主才补发下一句 → 朗读节奏 = 真实播放节奏，不积压、不跳段、不滞后太多；
+- 事件新增 `para`（段序号）与 `paraStart`（段首片段）：客户端据此**按整段裁剪**、
+  按 `(turnId,index)` 去重；`MAX_PENDING` 只做异常安全网（按整段丢最旧的、
+  保护正在播的段与本轮第一段）；
+- **追赶最新**（用户追加需求：全部朗读虽正确，但长回复会越读越滞后）：调度器估算待朗读音频时长
+  （已发未确认 + 队列 + 当前段剩余，约 210ms/字），超过设置项 `readAloudLag`（默认 7.5 秒，0=关闭）
+  就**整段跳到最新几段**：保留「已开读的段」+「**最新 3 段**」，中间未开始发的完整段落整段跳过 ——
+  跳过时只整段丢「还没开始发」的段；**例外**：生成很快、仍在流式输出时，正在读的段
+  可以**只读首句就跳走**（见下一条 skim）；生成结束后的剩余段落完整读完；
+  于是长回复的听感是"一直贴着最新内容念"；
+- **生成很快时只读首句**（用户要求）：`streaming` 且「还没发出去的内容（`backlogMs`，不含流水线提前量）」超预算时，
+  正在读的段落发出首句后即放弃剩余句子直接跳走
+  （`skim=true`；诊断用 `trimmedSentences/truncatedParagraphs` 计数）；生成结束（`streaming=false`）后剩余段落完整读完、不截断结尾。
+- **评审后加固**（P2）：watchdog 只在真发句 / 收到 ack 时重新计时（持续 push 不会拖住放行）；
+  pending 收尾加 1.2s grace（等首条 ack，流控/追赶才生效；老客户端到点照旧排空）；
+  SSE 新连接清零旧「已发未确认」（刷新后首句不再等 10 秒）；`~~~` 围栏要求行首（正文里的连续 ~ 不吞后文）；
+  curPara 尾部未成句时也算最新内容（超预算不再先读旧段）；dispose / 换轮后旧 reader 失效；
+  诊断增加 `awaitingFlush` / `playingMs` / `budgetMs` 与 `readAloudScheduler.rejectedAcks/lastRejectedAck`；
+- **追赶计时修正**（用户反馈「15s 没把朗读算进去」）：客户端在**开始播放**时就 ack，被 ack 的句子还要播 2~5 秒 ——
+  追赶计时现在把「正在播放的剩余时长」也算进积压，并且客户端通过 ack 的 `durationMs` 回传真实音频时长（老客户端退回按字数估算）；
+- **本轮调优汇总**（用户连续反馈后定稿）：
+  - 预算 15s → **7.5s**（一半），设置项 0.5s 步进；
+  - 追赶目标从「只留最新 1 段」改为「**保留最新 3 段**」（跳到最新第 3 条）；
+  - 生成很快时 **skim：每段只读首句就跳**（判据 `backlogMs`，不是含流水线提前量的 `lagMs`）；
+  - 计时含「正在播放的剩余时长」，客户端 ack 带真实音频时长 `durationMs`；
+  - 诊断补齐：`playingMs` / `backlogMs` / `budgetMs` / `streaming` / `skim` /
+    `keepParagraphs` / `trimmedSentences` / `truncatedParagraphs` / `awaitingFlush` /
+    `readAloudScheduler.rejectedAcks`；
+- 兼容/兜底：收不到 ack 时自动降级为旧的 400ms 时间窗口节奏（积压超预算时收尾先等 1.2s grace 再排空）；
+  `flow` 模式下某句 `ACK_STALL_MS=10s` 没有 ack 就 watchdog 放行一条，永不永久卡死；
+- **朗读高亮覆盖层**（2026-11-01 用户反馈修复）：覆盖层 `z-index: 2147483647` 会在
+  设置弹框打开时画到弹框上面 → 改为 `z-index: 900`（高于正文、低于 DSH 的 1000 级浮层）；
+  另外检测到 `[aria-modal="true"] / [role="dialog"] / [role="alertdialog"]` 时直接隐藏
+  覆盖层（MutationObserver 监听挂载/卸载，关闭后自动重画）；旧样式会在下次 `set()` 时覆写；
+  同时把每个色块**裁剪到「会话滚动视口 ∩ 窗口 ∩（底部输入区以上）」**——
+  消息滚出视口后 Range 仍会报原位置，不裁剪就会画到输入框/顶栏上面
+  （用户第二次反馈：滚动到输入框下方，高亮显示在输入框上）；
+  回归 `test/highlight-overlay.test.mjs`；
+- 回归：`test/read-aloud-scheduler.test.mjs`（纯逻辑）、`test/read-aloud-chain.test.mjs`
+  （真实钩子 + 模拟客户端 ack 的端到端）、`test/read-aloud-emit-rate.test.mjs`（无 ack 降级）。
+
 ### 8. 聆听与朗读是两个独立的事
 
 麦克风按钮**只管聆听**；朗读有独立的「停止朗读」按钮和设置里的总开关。
@@ -331,7 +405,7 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
 ## 回归测试
 
 ```bash
-npm test             # 40 个测试文件（不连宿主）
+npm test             # 51 个测试文件（不连宿主）
 npm run build:client # 把 src/client/pure/ 内联进 lib/client.js
 npm run check:client # 只校验产物是否最新（CI 用）
 npm run test:silence -- http://127.0.0.1:<端口>   # 静音与流式识别回归（需要宿主在运行）

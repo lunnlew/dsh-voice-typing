@@ -278,15 +278,64 @@ check('ttsFailed 是短词', /ttsFailed: '朗读失败'/.test(cli))
 check('英文 ttsFailed 也有', /ttsFailed: 'TTS failed'/.test(cli))
 check('调试快照暴露 ttsFailures', /ttsFailures: ttsFailuresRef\.current/.test(cli))
 
-console.log('\n客户端：朗读只跟最新内容走')
-check('只读当前这一轮的句子',
-  /if \(turnId && currentTurnIdRef\.current && turnId !== currentTurnIdRef\.current\) return/.test(cli),
-  '上一轮的句子还在路上时混进来，就会「新一轮恢复朗读却读到很早之前的内容」')
-check('待播有上限', /const MAX_PENDING = 3/.test(cli))
-check('积压超限时丢最旧的', /trimBacklog/.test(cli))
-check('本轮第一句不参与丢弃',
-  /\.findIndex\(\(x\) => x\.index !== 0\)/.test(cli) || /x\.index !== 0/.test(cli))
-check('入队时带上本轮序号', /speakQueueRef\.current\.push\(\{ sentence, gen, index \}\)/.test(cli))
+console.log('\n客户端：朗读流控（reading-ack）—— 生成快于播放时不再丢句跳段')
+check('只读当前这一轮的句子；index===0 时自愈新轮（turnId 不再粘住）',
+  /turnId !== currentTurnIdRef\.current/.test(cli)
+  && /if \(isTurnMismatch && !isNewTurnFirst\) \{/.test(cli)
+  && /const isNewTurnFirst = isTurnMismatch && index === 0/.test(cli),
+  '漏收一次 turn-begin 就会让整轮句子都被当成「上一轮」丢掉（整轮不朗读）')
+check('自愈时采纳新轮次并停掉上一轮朗读',
+  /currentTurnIdRef\.current = turnId[\s\S]{0,200}?haltSpeaking\(true\)/.test(cli))
+check('用 turnId:index 去重（宿主重复发不会重播）',
+  /const key = `\$\{turnId \?\? ''\}:\$\{index\}`/.test(cli)
+  && /if \(seen\.has\(key\)\) \{[\s\S]{0,200}?ackDropped\(\)/.test(cli)
+  && /MAX_SEEN_SENTENCE_KEYS/.test(cli),
+  '没有去重时宿主重复广播会让同一句播两遍（「读完后面又读前面」）')
+check('解析 para/paraStart（老宿主降级：para=-1、paraStart=index===0）',
+  /const para = Number\.isInteger\(payload\?\.para\)/.test(cli)
+  && /const paraStart = typeof payload\?\.paraStart === 'boolean'/.test(cli)
+  && /: index === 0/.test(cli))
+check('待播上限只是安全网（8 句，流控正常时永远不触发）', /const MAX_PENDING = 8/.test(cli))
+check('入队时带上段落/轮次/会话信息（供裁剪与回执）',
+  /speakQueueRef\.current\.push\(\{[\s\S]{0,160}?sessionId: ackSid, turnId: turnId \?\? ackTurn,[\s\S]{0,40}?\}\)/.test(cli))
+
+console.log('\n客户端：每一条收到的 sentence 都必须恰好回执一次（漏了宿主等 watchdog 10 秒）')
+check('ackReading：POST reading-ack，count 单次上限 64（超了拆批）',
+  /const ackReading = useCallback\(\(sessionId, turnId, count = 1[^)]*\) => \{/.test(cli)
+  && /`\$\{BASE\}\/reading-ack`/.test(cli)
+  && /method: 'POST'/.test(cli)
+  && /for \(let left = total; left > 0; left -= 64\)/.test(cli)
+  && /count: n/.test(cli),
+  '没有回执宿主只能等 watchdog（朗读变慢），或降级回 400ms 时间窗口')
+check('回执可带真实音频时长（宿主追赶计时用它更准）',
+  /durationMs/.test(cli)
+  && /decoded\?\.duration/.test(cli),
+  '宿主用「正在播放的剩余时长」算追赶预算；给真实时长比按字数估算准')
+check('回执用事件 payload 里的 sessionId/turnId（不是本地 ref）',
+  /const ackSid = payload\.sessionId \|\| sessionIdRef\.current \|\| ''/.test(cli)
+  && /const ackTurn = typeof payload\.turnId === 'string' \? payload\.turnId : ''/.test(cli),
+  '宿主按 session+turn 记账，用本地 ref 在换轮边界会记错账')
+check('① 正常播：开始播放前回执 1 条（可带真实时长）',
+  /readingHighlightRef\.current\?\.set\(sentence\)[\s\S]{0,500}?ackReading\(ackSid, ackTurn, 1(?:, decodedMs)?\)[\s\S]{0,300}?await play\(decoded, gen\)/.test(cli),
+  '播放是串行且很长的（一句 2~3 秒），等播完才回执宿主会一直等我们')
+check('② 合成失败 / 25s 超时 / 代次失效：也回执',
+  /\/\/ ②[^\n]*[\s\S]{0,200}?ackReading\(ackSid, ackTurn, 1\)/.test(cli))
+check('③ 入队前被丢弃的也回执（开关关/轮次不符/静音/去重）',
+  /const ackDropped = \(\) => ackReading\(ackSid, ackTurn, 1\)/.test(cli)
+  && /ackDropped\(\)\s*\n\s*return/.test(cli),
+  '这些句子永远不会播，但宿主账上已发出 —— 不回执就等 watchdog')
+check('④ 安全网裁剪 / 异常退出：按丢弃条数回执（带句子自己的 session/turn）',
+  /const \{ dropped, droppedItems \} = trimBacklog\([\s\S]{0,500}?ackDroppedItems\(droppedItems\)/.test(cli)
+  && /const ackDroppedItems = useCallback\(\(items\)/.test(cli)
+  && /ackDroppedItems\(leftover\)/.test(cli),
+  '裁剪丢的句子不回执 → 宿主等 watchdog')
+check('⑤ haltSpeaking 清队列时按条数一次性回执',
+  /const dropped = pending\.slice\(0\)[\s\S]{0,120}?speakQueueRef\.current\.length = 0[\s\S]{0,120}?ackDroppedItems\(dropped\)/.test(cli),
+  '清掉的句子在宿主账上是「已发未确认」')
+check('调试快照暴露 acks/trimmed（流控在不在跑、有没有兜底丢句）',
+  /acks: acksSentRef\.current/.test(cli) && /trimmed: trimmedRef\.current/.test(cli))
+check('播放被跳过也计数（代次失效不再静默）',
+  /if \(gen !== speakGenRef\.current\) \{[\s\S]{0,200}?playSkippedRef\.current \+= 1/.test(cli))
 
 console.log('\n客户端：播放前必须等播放上下文恢复（否则 suspended 卡死整条管道）')
 check('play 在 start 前 await resume（带超时兜底）',
@@ -308,58 +357,145 @@ check('首次用户手势预热并恢复播放上下文',
   && /addEventListener\('keydown', warmPlaybackOnGesture, \{ once: true, capture: true \}\)/.test(cli),
   '朗读与语音模式无关：没开麦克风就没有手势路径去 resume，需在首次点击/按键时预热')
 
-console.log('\n积压裁剪（真的跑纯函数）')
+console.log('\n安全网裁剪（真的跑纯函数）：按整段丢，绝不从段落中间开始播')
 {
-  // 积压 4 句（上限 3）→ 丢最旧的，留最新的 3 句。
-  const inflight = [{ index: 1 }, { index: 2 }]
-  const queue = [{ index: 3 }, { index: 4 }]
-  const out = trimBacklog(inflight, queue, 3)
-  check('总数降到上限', out.inflight.length + out.queue.length === 3,
-    `${out.inflight.length}+${out.queue.length}`)
-  check('丢的是最旧的那句',
-    !out.inflight.some((x) => x.index === 1) && !out.queue.some((x) => x.index === 1),
-    JSON.stringify([out.inflight.map((x) => x.index), out.queue.map((x) => x.index)]))
-  check('留下的是最新的几句',
-    JSON.stringify([...out.inflight, ...out.queue].map((x) => x.index)) === '[2,3,4]',
-    JSON.stringify([...out.inflight, ...out.queue].map((x) => x.index)))
+  // 没超上限：原样保留，dropped=0（流控正常时永远是这条路径）。
+  const inflight = [{ index: 0, para: 0 }, { index: 1, para: 0 }]
+  const queue = [{ index: 2, para: 1 }]
+  const out = trimBacklog(inflight, queue, 8, { playingPara: 0 })
+  check('没超上限就不丢（dropped=0）',
+    out.dropped === 0 && out.inflight.length === 2 && out.queue.length === 1,
+    `dropped=${out.dropped} ${out.inflight.length}+${out.queue.length}`)
 }
 {
-  // 回归：受保护的首句挡在队头时，绝不能退而丢**最新**的句子。
-  // 以前只试队头（首句受保护 → 跳过），于是去丢队尾（最新）——
-  // 正好违背「超了就丢最旧、贴着最新内容」。必须跳过首句、
-  // 丢最旧的**可丢**项。
+  // 超上限：从最旧的**未保护**段整段丢（段可以横跨 inflight/queue，也必须一起丢）。
+  // para0=[0,1]（含首句 + 正在播，受保护）、para1=[2(inflight),3(queue)]（可丢）、
+  // para2=[4,5]（最新，受保护）。
+  const inflight = [
+    { index: 0, para: 0 }, { index: 1, para: 0 }, { index: 2, para: 1 },
+  ]
+  const queue = [
+    { index: 3, para: 1 },
+    { index: 4, para: 2 }, { index: 5, para: 2 },
+  ]
+  const out = trimBacklog(inflight, queue, 4, { playingPara: 0 })
+  const all = [...out.inflight, ...out.queue].map((x) => x.index)
+  check('整段丢弃：para1 的两句一起丢（不拆段）',
+    out.dropped === 2 && !all.includes(2) && !all.includes(3),
+    `dropped=${out.dropped} 留下 [${all}]`)
+  check('保护含本轮首句的段落（para0 不丢）',
+    all.includes(0) && all.includes(1), `留下 [${all}]`)
+  check('保护最新段（para2 完整保留）',
+    all.includes(4) && all.includes(5), `留下 [${all}]`)
+  check('剩下的仍是完整段且保序',
+    JSON.stringify(all) === '[0,1,4,5]', `留下 [${all}]`)
+  check('droppedItems 精确列出被丢的项（回执要用原对象）',
+    out.droppedItems.length === 2 && out.droppedItems.every((x) => x.index === 2 || x.index === 3),
+    JSON.stringify(out.droppedItems.map((x) => x.index)))
+}
+{
+  // 「正在播的段」与「最新段」之间的未保护段才可丢。
+  // para0=[0,1]（首句）、para1=[2,3]（正在播）、para2=[4,5]（中间，未保护）、
+  // para3=[6,7]（最新）。
+  const inflight = [
+    { index: 0, para: 0 }, { index: 1, para: 0 },
+    { index: 2, para: 1 }, { index: 3, para: 1 },
+  ]
+  const queue = [
+    { index: 4, para: 2 }, { index: 5, para: 2 },
+    { index: 6, para: 3 }, { index: 7, para: 3 },
+  ]
+  const out = trimBacklog(inflight, queue, 4, { playingPara: 1 })
+  const all = [...out.inflight, ...out.queue].map((x) => x.index)
+  check('正在播的段落整段保留（不能只留段首）',
+    all.includes(2) && all.includes(3), `留下 [${all}]`)
+  check('最新段整段保留（不能为了压上限丢最新）',
+    all.includes(6) && all.includes(7), `留下 [${all}]`)
+  check('丢的是中间未保护的整段（para2）',
+    out.dropped === 2 && !all.includes(4) && !all.includes(5), `留下 [${all}]`)
+}
+{
+  // 评审 P2 定向回归（task-9 要求）：受保护组已超上限时，**不许丢最新段**。
+  // 段0 9 句（含 index0 → 受保护）+ 段1 3 句（最新段）+ max=8。
+  const queue = [
+    ...Array.from({ length: 9 }, (_, i) => ({ index: i, para: 0 })),
+    { index: 9, para: 1 }, { index: 10, para: 1 }, { index: 11, para: 1 },
+  ]
+  const out = trimBacklog([], queue, 8, { playingPara: 0 })
+  const all = [...out.inflight, ...out.queue]
+  const allIdx = all.map((x) => x.index)
+  check('受保护段超上限时不丢最新段（宁可软上限 12 > 8）',
+    out.dropped === 0 && allIdx.includes(9) && allIdx.includes(10) && allIdx.includes(11) && all.length === 12,
+    `dropped=${out.dropped} 留下 [${allIdx}]`)
+  check('软上限：剩下的句数可以 > max（调用方不能假设一定压到 max）',
+    all.length > 8, `${all.length}`)
+}
+{
+  // 评审 P1 定向：单段 12 句 burst（唯一组 = 最新组）→ 一句都不丢，全部会念。
+  // 这正是「单段长回复只念第一句」的输入形状。
+  const queue = Array.from({ length: 12 }, (_, i) => ({ index: i, para: 0 }))
+  const out = trimBacklog([], queue, 8, { playingPara: -1 })
+  check('单段 12 句 burst：整段受保护、不丢任何一句',
+    out.dropped === 0 && out.queue.length === 12, `dropped=${out.dropped} 剩 ${out.queue.length}`)
+}
+{
+  // 老宿主（没 para）降级：每句各成一段，仍然能裁剪（最新那句受保护）。
   const inflight = [{ index: 0 }, { index: 1 }, { index: 2 }]
-  const queue = [{ index: 3 }]
-  const out = trimBacklog(inflight, queue, 3)
-  check('首句保留', out.inflight.some((x) => x.index === 0) || out.queue.some((x) => x.index === 0),
-    JSON.stringify([out.inflight.map((x) => x.index), out.queue.map((x) => x.index)]))
-  check('丢的是最旧可丢句(1)，不是最新句(3)',
-    !out.inflight.some((x) => x.index === 1) && !out.queue.some((x) => x.index === 1)
-      && (out.inflight.some((x) => x.index === 3) || out.queue.some((x) => x.index === 3)),
-    JSON.stringify([out.inflight.map((x) => x.index), out.queue.map((x) => x.index)]))
-  check('保留的是 [0,2,3]（贴着最新）',
-    JSON.stringify([...out.inflight, ...out.queue].map((x) => x.index)) === '[0,2,3]',
-    JSON.stringify([...out.inflight, ...out.queue].map((x) => x.index)))
+  const queue = [{ index: 3 }, { index: 4 }, { index: 5 }, { index: 6 }]
+  const out = trimBacklog(inflight, queue, 3, {})
+  const all = [...out.inflight, ...out.queue].map((x) => x.index)
+  check('无 para 时仍能裁剪（每句一段）',
+    out.dropped === 4 && JSON.stringify(all) === '[0,5,6]',
+    `dropped=${out.dropped} 留下 [${all}]`)
 }
 {
-  // 只剩第一句时不能再丢（否则开头那句永远播不到）。
-  const out = trimBacklog([{ index: 0 }], [], 3)
-  check('只有第一句时原样保留', out.inflight.length === 1 && out.inflight[0].index === 0,
-    JSON.stringify(out.inflight))
+  // 只剩受保护的段：不能再丢（宁可软超上限，也不破坏段落完整性）。
+  const out = trimBacklog([{ index: 0, para: 0 }], [{ index: 1, para: 0 }], 1, {})
+  check('只剩受保护段时不再丢（软上限）',
+    out.dropped === 0 && out.inflight.length + out.queue.length === 2,
+    `dropped=${out.dropped}`)
 }
 {
-  // 没超上限时不动。
-  const out = trimBacklog([{ index: 0 }], [{ index: 1 }], 3)
-  check('没超上限就不丢', out.inflight.length === 1 && out.queue.length === 1,
-    `${out.inflight.length}+${out.queue.length}`)
+  // 同号段不相邻时不能误合并：para0 的 idx0 受保护，不代表 idx2 也受保护。
+  // 但 idx2 在最后一组（最新）→ 也受保护；中间的 para1 只受 playingPara 保护。
+  const inflight = [{ index: 0, para: 0 }, { index: 1, para: 1 }, { index: 2, para: 0 }]
+  const outPlaying = trimBacklog(inflight.slice(), [], 2, { playingPara: 1 })
+  check('正在播 + 首句 + 最新三者都受保护时不再丢（软上限）',
+    outPlaying.dropped === 0
+      && JSON.stringify(outPlaying.inflight.map((x) => x.index)) === '[0,1,2]',
+    `dropped=${outPlaying.dropped}`)
+  const out = trimBacklog(inflight.slice(), [], 2, {})
+  check('只按「连续同号」分组（非相邻同号段不合并，只丢中间未保护的组）',
+    out.dropped === 1 && JSON.stringify(out.inflight.map((x) => x.index)) === '[0,2]',
+    `dropped=${out.dropped} 留下 [${out.inflight.map((x) => x.index)}]`)
 }
-{
-  // 顺序不能乱：先丢 inflight 里的（更旧的），再丢队列里的。
-  const out = trimBacklog([{ index: 1 }, { index: 2 }, { index: 3 }], [{ index: 4 }], 2)
-  check('先丢更旧的（inflight 里的）',
-    JSON.stringify([...out.inflight, ...out.queue].map((x) => x.index)) === '[3,4]',
-    JSON.stringify([...out.inflight, ...out.queue].map((x) => x.index)))
-}
+
+console.log('\n客户端：评审 P1/P2/P3 回归（源码形状）')
+check('P1：播完一句**先 trimPending 再复位 playingPara**（否则当前段剩余被整段裁掉）',
+  /\/\/ ③ 安全网裁剪必须在[\s\S]{0,500}?trimPending\(\)\s*\n\s*playingParaRef\.current = -1/.test(cli),
+  '顺序反了就是「一段 12 句只念第一句」：复位后 trim 看到的当前段已不受保护')
+check('P1：管道结束/异常路径也会清掉 playingPara 的陈旧值',
+  (cli.match(/playingParaRef\.current = -1/g) || []).length >= 3,
+  'haltSpeaking / 播完 trim 之后 / finally 各一次；异常退出残留保护值会挡后续裁剪')
+check('P2：resume 轮询中代次失效立刻退出（不再傻等 8 秒）',
+  /while \(playCtx\.state === 'suspended' && Date\.now\(\) < deadline\) \{\s*\n\s*\/\/[\s\S]{0,260}?if \(gen !== speakGenRef\.current\) break/.test(cli))
+check('P2：resume 结束后、source.start 前再查一次代次（停止/换轮后旧句不得出声）',
+  /if \(gen !== speakGenRef\.current\) break[\s\S]{0,900}?if \(gen !== speakGenRef\.current\) \{\s*\n\s*playSkippedRef\.current \+= 1\s*\n\s*return\s*\n\s*\}[\s\S]{0,2000}?source\.start\(0\)/.test(cli),
+  '以前只在进入 play 时查一次；suspended→resume 成功后旧句会照播（评审 P2）')
+check('P3：高亮 set 用 try/catch 包住（抛错不能漏 ack / 不能 unhandled rejection）',
+  /try \{\s*\n\s*readingHighlightRef\.current\?\.set\(sentence\)\s*\n\s*\} catch/.test(cli))
+check('P3：trimmed 只统计安全网裁剪，另加 dropped 计数并进调试快照',
+  /trimmedRef\.current \+= dropped\b/.test(cli)
+  && /droppedRef\.current \+= dropped\.length/.test(cli)
+  && /droppedRef\.current \+= leftover\.length/.test(cli)
+  && /dropped: droppedRef\.current/.test(cli)
+  && /trimmed: trimmedRef\.current/.test(cli),
+  '无 AudioContext 清队列 / 管道异常剩余不属于「宿主流控失效」，混进 trimmed 会误导诊断')
+check('P3：追赶秒数空/非法输入回退默认 7.5（不是 0），合法值 clamp 0..120 / 0.5 步进',
+  /const raw = String\(event\.target\.value \?\? ''\)\.trim\(\)/.test(cli)
+  && /raw === '' \|\| !Number\.isFinite\(n\)/.test(cli)
+  && /\? 7\.5\s*\n\s*: Math\.max\(0, Math\.min\(120, Math\.round\(n \* 2\) \/ 2\)\)/.test(cli),
+  "Number('') === 0，以前清空输入框会把追赶关掉；默认 7.5 = 原 15 的一半")
 
 console.log('\n客户端：配置同步必须真的拿到「朗读回复」')
 check('拉到的配置与共享存储合并（存储里有值的键优先）',
@@ -397,8 +533,11 @@ check('只认条数「增加」才是新一轮（减小=裁剪，不打断）',
 
 console.log('\n客户端：朗读管道不能永久卡死（超时/异常兜底）')
 check('播放上下文在 try 内获取（构造抛错不卡死队列）',
-  /playCtx = getPlayCtx\(\)/.test(cli) && /if \(!playCtx\) return/.test(cli),
+  /playCtx = getPlayCtx\(\)/.test(cli) && /if \(!playCtx\) \{/.test(cli),
   '原来 getPlayCtx() 在 try 外 —— 抛错会让 pumpingRef 卡 true，之后所有句子只入队不播')
+check('拿不到播放上下文时清队列退出（不会同步互递归打爆栈）',
+  /if \(!playCtx\) \{[\s\S]{0,700}?speakQueueRef\.current\.splice\(0, speakQueueRef\.current\.length\)[\s\S]{0,400}?ackDroppedItems\(dropped\)[\s\S]{0,500}?setSpeaking\(false\)\s*\n\s*return/.test(cli),
+  '以前 return 后靠 finally 里「queue 非空 → 再 pumpQueue()」，队列不消耗 → 同步互递归 → 栈溢出 + speaking 卡 true')
 check('合成有超时兜底（Promise.race + sleep）',
   /Promise\.race\(\[\s*promise,\s*sleep\(window, TTS_TIMEOUT_MS\)\.then\(\(\) => null\),\s*\]\)/.test(cli),
   '宿主 /tts 挂住时 await promise 永不 resolve → 朗读管道永久死锁')

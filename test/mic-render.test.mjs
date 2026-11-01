@@ -34,9 +34,6 @@ const locale = { register: () => () => {} }
 const effect = (fn) => { fn(); return () => {} }
 mod.apply({ inject: (_names, cb) => cb({ slots, locale, effect }) })
 
-const mic = registrations.find((r) => r.component && /MicButton/.test(r.component.name ?? ''))
-  ?? registrations.find((r) => r.options?.id !== 'settings')
-
 let passed = 0
 let failed = 0
 function check(name, ok, detail) {
@@ -44,11 +41,13 @@ function check(name, ok, detail) {
   else { failed++; console.log('  ✗ ' + name + (detail ? '：' + detail : '')) }
 }
 
+const micRegistration = registrations.find((r) => r.component && /MicButton/.test(r.component.name ?? ''))
+  ?? registrations.find((r) => r.options?.id !== 'settings')
 console.log('槽位:', registrations.map((r) => `${r.options.name}#${r.options.id}`).join(', '))
 
 // ── 1. 麦克风按钮：默认状态必须能渲染 ──
 console.log('\n麦克风按钮渲染')
-let MicComponent = null
+let MicComponent = micRegistration?.component ?? null
 for (const reg of registrations) {
   try {
     renderToStaticMarkup(React.createElement(reg.component, {}))
@@ -58,14 +57,21 @@ for (const reg of registrations) {
 }
 check('所有槽位默认渲染不抛错', true)
 
-// 找到麦克风按钮组件：它的渲染结果里含 <button> 与 svg 麦克风
-for (const reg of registrations) {
-  try {
-    const html = renderToStaticMarkup(React.createElement(reg.component, {}))
-    if (html.includes('<svg') && html.includes('rx="9"')) MicComponent = reg.component
-  } catch { /* 上面已报 */ }
+// 兜底识别：按「渲染结果里有 <button> 和 <svg>（图标按钮）」找。
+//
+// **不要写死 SVG 的具体造型**（这里以前断言 `rx="9"`）：
+// 图标改一版测试就假红 —— 麦克风图标的圆角、路径随时会调整。
+// 稳定的识别依据是「注册的组件名」或「它是一个带图标的按钮」。
+if (!MicComponent) {
+  for (const reg of registrations) {
+    try {
+      const html = renderToStaticMarkup(React.createElement(reg.component, {}))
+      if (html.includes('<button') && html.includes('<svg')) MicComponent = reg.component
+    } catch { /* 上面已报 */ }
+  }
 }
-check('找到麦克风按钮组件', !!MicComponent)
+check('找到麦克风按钮组件', !!MicComponent,
+  '优先用导出的组件名 MicButton，其次按「按钮 + svg 图标」识别，不依赖图标细节')
 
 if (MicComponent) {
   // ── 2. 构造 speaking=true 的场景 ──

@@ -1,5 +1,7 @@
 /**
- * 回归测试：回合边界（turn-start）的判定。
+ * 回归测试：回合边界（协议 v3 的 turn-begin）的判定。
+ *
+ * 历史名：v2 时代它叫 turn-start；v3 起名字/语义统一为 turn-begin（一次调用结束叫 call-end）。
  *
  * 背景（2026-10-31）：
  *   服务端用「会话里的用户消息条数变化」判断是不是新的一轮对话，
@@ -60,9 +62,11 @@ check('句子事件不再要求语音模式开启',
   '要求先开语音模式会让「朗读回复」完全不起作用')
 
 console.log('\n回合模型：turnId 与序号')
+const scheduler = fs.readFileSync(root + '/lib/read-aloud-scheduler.js', 'utf8')
 check('宿主分配 turnId', /turnIds\.set\(sessionId, turnId\)/.test(tm))
 check('句子带 turnId 与序号',
-  /emit\('sentence', \{ text, turnId: turn\.turnId, index \}\)/.test(idx))
+  /emit\('sentence', \{[\s\S]{0,260}?turnId: state\.turnId[\s\S]{0,80}?index: nextIndex\(state\.sessionId\)/.test(scheduler),
+  '句子带 turnId（属于哪一轮）与 index（本轮第几句），由调度器统一发')
 check('回合开始事件带 turnId', /emit\('turn-begin', \{ sessionId, turnId: turn\.turnId \}\)/.test(idx))
 check('回合结束事件带「刚结束的上一轮」turnId（真正一轮结束）',
   /emit\('turn-end', \{ sessionId, turnId: turn\.prevTurnId \}\)/.test(idx),

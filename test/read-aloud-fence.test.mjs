@@ -119,6 +119,24 @@ const check = (n, ok, d) => {
   check('无代码块时正常朗读', s.join('').includes('普通的话'))
 }
 
+// 6) 围栏标记本身被 chunk 边界切成两半（真实 token 流式会这样）
+//
+// 旧实现逐块 `chunk.text.split('```')`：chunk 末尾只有 "``" 时识别不出围栏，
+// 两个反引号被当正文；下一块的 "`js" 又让状态机错位 —— 实测代码被念出来，
+// 而围栏**之后**的正文反而被当代码整段丢掉。现在由 lib/fence-filter.js 跨 chunk 处理。
+{
+  const reply = '下面是一段示例代码：\n```js\nconst x = 1\nconsole.log(x)\n```\n代码执行完之后会输出结果。'
+  const chunks = []
+  for (let i = 0; i < reply.length; i += 4) chunks.push(reply.slice(i, i + 4))
+  const s = await run(chunks)
+  const j = s.join('')
+  console.log('  用例6 朗读:', JSON.stringify(s))
+  check('围栏被 chunk 切开：围栏前的正文在', j.includes('下面是一段示例代码'))
+  check('围栏被 chunk 切开：围栏后的正文也在（不被当代码丢掉）', j.includes('代码执行完之后会输出结果'))
+  check('围栏被 chunk 切开：代码一个字都没念',
+    !j.includes('const x') && !j.includes('console.log') && !/\bjs\b/.test(j))
+}
+
 console.log(`\n通过 ${pass}，失败 ${fail}`)
 process.exitCode = fail ? 1 : 0
 process.exit(fail ? 1 : 0)

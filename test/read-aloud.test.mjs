@@ -25,6 +25,9 @@ import { stripForSpeech } from '../lib/speech-clean.js'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const idx = fs.readFileSync(root + '/lib/index.js', 'utf8')
+// 「切段落 / 段内切句 / 什么时候发」已抽到独立模块 lib/read-aloud-scheduler.js，
+// 宿主 index.js 只负责把正文喂给它、并在调用结束时封口。
+const scheduler = fs.readFileSync(root + '/lib/read-aloud-scheduler.js', 'utf8')
 const lines = idx.split('\n')
 
 let passed = 0
@@ -40,10 +43,19 @@ check('钩子用 currentSettings.readAloud 判断',
   '钩子注册在 ctx.inject 之外，取不到 apply 作用域的 settings')
 check('钩子里没有直接用 settings',
   !/ctx\.on\('llm\/stream'[\s\S]{0,900}?\bsettings\.readAloud/.test(idx))
-check('广播 sentence 事件（带 turnId 与序号）',
-  /emit\('sentence', \{ text, turnId: turn\.turnId, index \}\)/.test(idx),
-  '句子必须带 turnId（它属于哪一轮）与 index（本轮第几句）')
-check('按句切分并清洗 Markdown', /stripForSpeech\(raw\)/.test(idx))
+check('广播 sentence 事件（带 turnId 与序号、段落标记）',
+  /emit\('sentence', \{[\s\S]{0,260}?turnId: state\.turnId[\s\S]{0,80}?index: nextIndex\(state\.sessionId\)[\s\S]{0,120}?para: item\.para[\s\S]{0,60}?paraStart: item\.paraStart/.test(scheduler),
+  '句子必须带 turnId（它属于哪一轮）与 index（本轮第几句），以及 para/paraStart（段落）')
+check('按句切分并清洗 Markdown', /stripForSpeech\(raw\)/.test(scheduler))
+check('宿主把流式正文喂给朗读调度器',
+  /readAloudScheduler\.reader\(sessionId, turn\.turnId\)/.test(idx) &&
+  /fence\.push\(chunk\.text\)/.test(idx) &&
+  /reader\.push\(visible\)/.test(idx),
+  '宿主负责跨 chunk 剔代码块（fence-filter）+ 喂正文，发句节奏由调度器决定')
+check('代码围栏识别跨 chunk（独立模块，不逐块 split）',
+  /createFenceFilter/.test(idx) &&
+  !/chunk\.text\.split\('```'\)/.test(idx.replace(/^[ \t]*\/\/[^\n]*$/gm, '')),
+  '围栏标记可能被 chunk 边界切开：逐块 split 会漏代码/丢正文')
 
 console.log('\nbusy 的置位与复位必须对称（今天引入过的回归）')
 const hookStart = lines.findIndex((l) => l.includes("ctx.on('llm/stream'"))

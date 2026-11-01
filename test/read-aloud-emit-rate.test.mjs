@@ -1,15 +1,21 @@
 /**
- * 端到端：一大段文本进来时，sentence 事件的**时间节奏**必须被时间窗口限住。
+ * 端到端：一大段文本进来时，sentence 事件的**时间节奏**必须被限住（不 burst）。
  *
  * 用户反馈：
  *   「可能会接收一大批的文本，导致发生了一大批的 TTS 请求。过程应该规则化一下吧」
  *   「按照时间窗口」「到指定的时间间隔内取到多余的某一条句子来进行合成」
  *
+ * **覆盖范围（重要）**：本文件只覆盖 **pending（无 ack / 老客户端）** 路径 ——
+ *   - 首句立刻发；
+ *   - 其余句子按 `EMIT_WINDOW_MS` 时间窗口逐条发（不会瞬间倒空）；
+ *   - 调用结束的收尾：关闭追赶（`readAloudLag=0`）时同步排空；开启追赶时先等
+ *     ack grace（默认 1.2s，给新客户端发首条 ack 的机会）再一次性排空，不丢尾巴。
+ * 新客户端（有 ack）的 **flow 流控 / 追赶** 路径（未确认 ≤ LEAD、ack 驱动、
+ * 按整段跳段）由 `test/read-aloud-chain.test.mjs`、`test/read-aloud-catchup.test.mjs`
+ * 与 `test/read-aloud-scheduler.test.mjs` 覆盖。
+ *
  * 本测试用**真实的 llm/stream 钩子**，让 inner 流一口气吐出 20 句（最坏情况），
- * 然后统计广播出来的 sentence 的时间分布：
- *   - 流结束那一瞬间不能爆出几十条（那正是「一大批请求」）；
- *   - 任一窗口长度内的条数要有上限；
- *   - 最后所有内容都要发出来（不丢）。
+ * 然后统计广播出来的 sentence 的时间分布。
  */
 import os from 'node:os'
 import path from 'node:path'
@@ -116,22 +122,30 @@ check('每条都不超过单句上限',
   sentences.every((s) => s.data.text.length <= MAX_SENTENCE_CHARS),
   '最长 ' + Math.max(...sentences.map((s) => s.data.text.length)))
 
-// ===== 核心：测「流式过程中的请求密度」 =====
+// ===== 核心：一次性灌入（最坏情况）时，收尾必须是「有限、有时限」的，不是按窗口慢慢拖 =====
 //
-// 注意设计取舍：流**结束后**，宿主会把队列里剩下的句子**一次性发完**
-// （理由见 lib/index.js 的注释：流已结束、句数有限，不存在持续爆发；
-//  再按窗口拖 400ms 一批只会让用户多等好几秒，而且宿主没有可靠的一轮结束回调）。
-// 所以「分批发」要在**流式过程中**测 —— 用逐块带延迟的方式模拟真实流式输出。
+// pending（无 ack / 老客户端）路径的语义是「首句立刻发 + 调用结束收尾发完」。
+// 现在收尾多了一个 1.2s 的 ack grace（新客户端可能在这 1.2s 内发第一条 ack、切到
+// flow 走流控与追赶；老客户端没有 ack，grace 到点后照旧一次发完 —— 不丢尾巴，只晚 ~1s）。
+// 所以这里能断言的是三件事（而不是「instant 条数 <= 总句数 + 2」那种恒真式）：
+//   1) 首句立刻发（不等 400ms 窗口）；
+//   2) 所有剩余句子都发出来了（不丢）—— 收尾在 grace 到点后由 flushPending 一次倒出；
+//   3) 收尾总时长有界（<= 3s）：如果退化成「只按 400ms 窗口一条条发、结束不排空」，
+//      20 句要 ~8s，这条会失败。
+// flow（有 ack）路径的「未确认 <= LEAD、ack 驱动」由
+// test/read-aloud-chain.test.mjs / test/read-aloud-catchup.test.mjs 覆盖。
 {
-  // 1) 最坏情况（一次性灌入 20 句）下，流结束瞬间不会爆出几十条 —— 首句 + 收尾，
-  //    收尾是有限的（总句数有限），这本身不会持续打请求。
-  const instant = times.filter((t) => t <= 20).length
-  check('一次性灌入时不出现「持续爆发」（首句优先，不排队等窗口）',
-    instant <= SENTENCES.length + 2,
-    '瞬间发了 ' + instant + ' 条')
+  const firstAt = times[0] ?? -1
+  const rest = times.slice(1)
+  const lastAt = times[times.length - 1] ?? -1
 
-  check('每条都不超过单句上限（收尾也一样）',
-    sentences.every((s) => s.data.text.length <= MAX_SENTENCE_CHARS))
+  check('首句立刻发（不等窗口）', firstAt >= 0 && firstAt <= 150, `首句 ${firstAt}ms`)
+  check('一次性灌入的剩余句子全部发出（不丢尾巴）',
+    rest.length === SENTENCES.length - 1,
+    `非首句 ${rest.length} 条 / 期望 ${SENTENCES.length - 1} 条`)
+  check('收尾有时限：最后一条在 3s 内到齐（含 1.2s 的 ack grace；不会按窗口拖 ~8s）',
+    lastAt >= 0 && lastAt <= 3000,
+    `最后一条 ${lastAt}ms，时间分布 ${JSON.stringify(times)}`)
 }
 
 console.log('\n真实流式场景：文本随时间陆续到达，请求速率必须被窗口限住')

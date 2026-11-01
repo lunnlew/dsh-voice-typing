@@ -58,15 +58,27 @@ window.__ModuleLoader__.load({
     /** 单次录音的最长时长，防止一次请求过大把宿主堵住。 */
     const MAX_RECORD_MS = 30000
     /**
-     * 待播句子的上限（还在排队 + 正在合成）。
+     * 待播句子的上限（还在排队 + 正在合成），单位是「句」。
      *
-     * 生成比朗读快时句子会越积越多，
-     * 于是听到的内容离最新回复越来越远。
-     * 超过上限就丢最旧的，保证朗读始终贴着最新内容。
+     * 现在**正常情况下根本触不到这个上限**：宿主按「已发未确认句数 <=
+     * READ_ALOUD_LEAD」发句，客户端每开始播一句就回一条 reading-ack，
+     * 队列长度被宿主流控钉在 3~4 条（见 ackReading）。
      *
-     * 本轮的第一句不参与丢弃 —— 朗读的第一声应该是回复的开头。
+     * 保留上限只是**安全网**（老宿主、ack 丢失、重连、宿主降级回 400ms
+     * 时间窗口）。真积压时必须按**整段**丢 —— 绝不能保留某段的段尾、
+     * 丢掉它的段首，否则用户会听到「从段落中间开始播」（本次修复要消灭的
+     * 听感）。规则在纯函数 trimBacklog 里（src/client/pure/backlog.js）。
      */
-    const MAX_PENDING = 3
+    const MAX_PENDING = 8
+
+    /**
+     * 句子去重带的上限（条）。
+     *
+     * 宿主重复广播同一条 sentence（重连补发、重复 emit）时，同一句绝不能
+     * 播两遍 —— 那正是「读完后面又读前面」的听感。key 是 `${turnId}:${index}`，
+     * 每轮不同，所以这个带子只需要有界，不需要精确淘汰。
+     */
+    const MAX_SEEN_SENTENCE_KEYS = 512
     const BASE = '/dsh-voice-typing'
 
     /** 中文词典。 */
@@ -108,6 +120,8 @@ window.__ModuleLoader__.load({
       autoSend: '识别后自动发送',
       readAloud: '朗读回复',
       readAloudHint: '把助手的回复念出来。关闭后下面所有朗读参数都不生效。不需要开语音模式，只要这个开关打开就会朗读。',
+      readAloudLag: '朗读追赶最新（秒）',
+      readAloudLagHint: '生成远比朗读快时，允许朗读最多落后屏幕这么多秒（默认 7.5 秒）；超过就整段跳过旧段落、保留最新 3 段（不会从段落中间开始念）。0 = 全部朗读、不跳段（长回复会越读越滞后）。',
       liveAsr: '实时字方式',
       liveAsrHint: '说话时实时出字用哪种方式。「整段重识别」精度最好，但段越长越慢；「流式解码」延迟低、长句不变快，但精度略低。最终稿始终用当前模型。',
       liveAsrFull: '整段重识别（精度最好）',
@@ -208,6 +222,8 @@ window.__ModuleLoader__.load({
       autoSend: 'Send automatically after recognition',
       readAloud: 'Read the reply aloud',
       readAloudHint: 'Speak the assistant replies. When off, all reading options below are ignored. No need to enable voice mode — this switch alone is enough.',
+      readAloudLag: 'Catch up to latest (seconds)',
+      readAloudLagHint: 'When generation outpaces speech, allow the readout to lag at most this many seconds behind the screen (default 7.5s); beyond that it skips whole paragraphs and keeps the newest 3 (never starts mid-paragraph). 0 = read everything, no skipping (long replies fall further and further behind).',
       liveAsr: 'Live text mode',
       liveAsrHint: 'How the live text is produced while you speak. "Full re-recognition" is the most accurate but slows down on long sentences; "streaming" stays fast but is slightly less accurate. The final text always uses the current model.',
       liveAsrFull: 'Full re-recognition (most accurate)',
@@ -607,18 +623,90 @@ window.__ModuleLoader__.load({
         matchCount: -1,
         rectCount: 0,
         layerChildren: 0,
+        /** 宿主弹框/遮罩是否打开（打开时覆盖层隐藏，避免画在弹框上面）。 */
+        modalOpen: false,
+        /** 是否按「会话滚动视口 ∩（底栏输入区以上）」裁剪过高亮。 */
+        clipped: false,
+        /** 因裁剪被完全丢掉的矩形数（这一句滚出视口/滚到输入框下面时 > 0）。 */
+        skippedRects: 0,
         error: '',
       }
 
+      /**
+       * 覆盖层 z-index。
+       *
+       * 不能取整型最大值：DSH 的弹框/遮罩是 `z-index:1000` 级别的浮层，
+       * 覆盖层如果取 `2147483647`，**设置弹框打开时高亮会画在弹框上面**（用户反馈）。
+       * 取 900：高于消息正文（正文没有 z-index），低于弹框（1000+）。
+       * 另外还有一道保险：检测到弹框打开时直接隐藏覆盖层（见 syncModal）。
+       */
+      const OVERLAY_Z_INDEX = 900
+
       const ensureStyle = () => {
-        if (doc.querySelector(`style[data-plugin-css="${STYLE_ID}"]`)) return
+        const css = [
+          `[data-voice-reading]{position:absolute;pointer-events:none;background:rgba(255,214,0,.32);border-radius:2px;}`,
+          `[data-voice-reading-overlay]{position:fixed;inset:0;pointer-events:none;z-index:${OVERLAY_Z_INDEX};}`,
+          `[data-voice-reading-overlay][data-voice-reading-hidden]{display:none;}`,
+        ].join('\n')
+        const existing = doc.querySelector(`style[data-plugin-css="${STYLE_ID}"]`)
+        if (existing) {
+          // 旧版本注入的是 z-index:2147483647 —— 升级后要把已存在的样式改过来，
+          // 否则页面没刷新时会继续盖在弹框上面。
+          if (existing.textContent !== css) existing.textContent = css
+          return
+        }
         const tag = doc.createElement('style')
         tag.dataset.pluginCss = STYLE_ID
-        tag.textContent = [
-          `[data-voice-reading]{position:absolute;pointer-events:none;background:rgba(255,214,0,.32);border-radius:2px;}`,
-          `[data-voice-reading-overlay]{position:fixed;inset:0;pointer-events:none;z-index:2147483647;}`,
-        ].join('\n')
+        tag.textContent = css
         doc.head.appendChild(tag)
+      }
+
+      /** 宿主弹框/遮罩是否打开。 */
+      let modalOpen = false
+      /** 监视弹框打开/关闭的 MutationObserver。 */
+      let modalObserver = null
+
+      const hasOpenModal = () => {
+        try {
+          return Boolean(doc.querySelector(
+            '[aria-modal="true"], [role="dialog"], [role="alertdialog"]',
+          ))
+        } catch {
+          return false
+        }
+      }
+
+      /** 弹框状态变化：隐藏/恢复覆盖层（打开时绝不能画在弹框上面）。 */
+      const syncModal = () => {
+        const nowOpen = hasOpenModal()
+        const applyHidden = () => {
+          if (!layer) return
+          if (modalOpen) layer.setAttribute('data-voice-reading-hidden', '')
+          else layer.removeAttribute('data-voice-reading-hidden')
+        }
+        if (nowOpen === modalOpen) {
+          // 状态没变也要对齐一次 DOM（layer 可能刚被重建，属性丢了）。
+          applyHidden()
+          return
+        }
+        modalOpen = nowOpen
+        diag.modalOpen = modalOpen
+        applyHidden()
+        if (!modalOpen && active && currentText) scheduleRender()
+      }
+
+      const ensureModalWatch = () => {
+        if (modalObserver) return
+        try {
+          modalObserver = new win.MutationObserver(() => syncModal())
+          modalObserver.observe(doc.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['role', 'aria-modal', 'hidden', 'style'],
+          })
+        } catch { /* 老环境没有 MutationObserver：只靠 z-index 兜底 */ }
+        syncModal()
       }
 
       const ensureLayer = () => {
@@ -685,28 +773,114 @@ window.__ModuleLoader__.load({
         return best
       }
 
-      /** 画一个矩形色块（视口坐标 → fixed 层内的绝对定位）。 */
-      const drawRect = (rect) => {
-        if (!rect || rect.width === 0 || rect.height === 0) return
+      /**
+       * 找「会话滚动视口」：从消息容器往上找 `overflow-y:auto/scroll/overlay` 的祖先。
+       *
+       * 为什么需要：消息滚出视口后，Range/元素矩形**仍然会报原位置**
+       * （父级的 `overflow:hidden` 只是视觉裁掉），于是固定在视口的覆盖层会把
+       * 高亮画到**输入框/顶栏上面**（用户反馈：滚动到输入框下方，高亮显示在输入框上）。
+       * 所以覆盖层必须自己裁剪到滚动视口。
+       */
+      const findScrollViewport = (el) => {
+        let node = el
+        while (node && node !== doc.body && node !== doc.documentElement) {
+          try {
+            const style = typeof win.getComputedStyle === 'function' ? win.getComputedStyle(node) : null
+            if (style && /auto|scroll|overlay/.test(style.overflowY)) return node
+          } catch { /* 忽略 */ }
+          node = node.parentElement
+        }
+        return null
+      }
+
+      /**
+       * 底部输入区（composer）的顶部；找不到返回 null。
+       *
+       * 只认「下半屏、够宽」的输入元素，避免把顶栏的搜索框当成底栏把高亮裁没了。
+       */
+      const findBottomChromeTop = () => {
+        let top = null
+        try {
+          const els = doc.querySelectorAll(
+            '[data-slot*="composer"], [data-testid*="composer"], textarea, [contenteditable="true"]',
+          )
+          const vh = win.innerHeight || 0
+          for (const el of els) {
+            const r = el.getBoundingClientRect()
+            if (r.width < 100 || r.height < 10) continue
+            if (vh && r.top < vh * 0.5) continue
+            if (top === null || r.top < top) top = r.top
+          }
+        } catch { /* 忽略 */ }
+        return top
+      }
+
+      /** 高亮允许出现的区域：滚动视口 ∩ 窗口 ∩（底栏输入区以上）。 */
+      const computeClipRect = (container) => {
+        const vw = win.innerWidth || 0
+        const vh = win.innerHeight || 0
+        const clip = { left: 0, top: 0, right: vw, bottom: vh }
+        const scrollEl = findScrollViewport(container)
+        if (scrollEl) {
+          try {
+            const r = scrollEl.getBoundingClientRect()
+            clip.left = Math.max(clip.left, r.left)
+            clip.top = Math.max(clip.top, r.top)
+            clip.right = Math.min(clip.right, r.right)
+            clip.bottom = Math.min(clip.bottom, r.bottom)
+          } catch { /* 忽略 */ }
+        }
+        const chromeTop = findBottomChromeTop()
+        if (chromeTop !== null && Number.isFinite(chromeTop)) {
+          clip.bottom = Math.min(clip.bottom, chromeTop)
+        }
+        diag.clipped = Boolean(scrollEl) || chromeTop !== null
+        return clip
+      }
+
+      /** 画一个矩形色块（视口坐标 → fixed 层内的绝对定位；先按 `clip` 裁剪）。 */
+      const drawRect = (rect, clip) => {
+        if (!rect) return
+        const left = Number(rect.left) || 0
+        const top = Number(rect.top) || 0
+        const right = Number.isFinite(rect.right) ? rect.right : left + (Number(rect.width) || 0)
+        const bottom = Number.isFinite(rect.bottom) ? rect.bottom : top + (Number(rect.height) || 0)
+        const x0 = Math.max(left, clip.left)
+        const x1 = Math.min(right, clip.right)
+        const y0 = Math.max(top, clip.top)
+        const y1 = Math.min(bottom, clip.bottom)
+        // 整块都在可视区外（比如这一句已经滚到输入框下面/顶栏上面）：不画。
+        if (x1 - x0 <= 0 || y1 - y0 <= 0) {
+          diag.skippedRects += 1
+          return
+        }
         const span = doc.createElement('span')
         span.setAttribute('data-voice-reading', '')
-        span.style.left = `${rect.left}px`
-        span.style.top = `${rect.top}px`
-        span.style.width = `${rect.width}px`
-        span.style.height = `${rect.height}px`
+        span.style.left = `${x0}px`
+        span.style.top = `${y0}px`
+        span.style.width = `${x1 - x0}px`
+        span.style.height = `${y1 - y0}px`
         layer.appendChild(span)
       }
 
-      /** 从矩形集合画色块。 */
-      const drawRects = (rects) => {
+      /** 从矩形集合画色块（按会话滚动视口裁剪，绝不画到视口外）。 */
+      const drawRects = (rects, clip) => {
         clear()
-        for (const rect of rects) drawRect(rect)
+        diag.skippedRects = 0
+        for (const rect of rects) drawRect(rect, clip)
       }
 
       /** 重算当前句的矩形并重画（滚动/重排时也调用）。 */
       const render = () => {
         raf = 0
         if (!active || !currentText) return
+        // 弹框/遮罩打开时不画高亮（z-index 再低也可能遇到高浮层；直接隐藏最稳）。
+        if (modalOpen) {
+          clear()
+          diag.rectCount = 0
+          diag.layerChildren = 0
+          return
+        }
         diag.active = true
         diag.target = currentText
         diag.error = ''
@@ -724,14 +898,17 @@ window.__ModuleLoader__.load({
         const textNodes = collectTextNodes(container)
         const ranges = matchInNodes(textNodes.map((n) => n.nodeValue), targetNorm)
         diag.matchCount = ranges ? ranges.length : 0
+        // 高亮只能出现在「会话滚动视口 ∩ 底栏输入区以上」：
+        // 已经滚出视口/滚到输入框下面的句子不画（用户反馈：会画到输入框上面）。
+        const clip = computeClipRect(container)
         if (!ranges) {
           win.console.debug(`[dsh-voice-typing] 高亮：目标句在容器内匹配不上，降级为整段高亮。target="${targetNorm.slice(0, 40)}"`)
         }
         if (!ranges || !ranges.length) {
           // 整句匹配不上（跨块/软换行错位）→ 降级：整段浅高亮。
           const rect = container.getBoundingClientRect()
-          drawRects([rect])
-          diag.rectCount = rect.width && rect.height ? 1 : 0
+          drawRects([rect], clip)
+          diag.rectCount = layer ? layer.children.length : 0
           diag.layerChildren = layer ? layer.children.length : 0
           return
         }
@@ -741,7 +918,7 @@ window.__ModuleLoader__.load({
           const last = ranges[ranges.length - 1]
           range.setStart(textNodes[first.nodeIndex], first.start)
           range.setEnd(textNodes[last.nodeIndex], last.end)
-          drawRects(range.getClientRects())
+          drawRects(range.getClientRects(), clip)
           diag.rectCount = layer ? layer.children.length : 0
         } catch (err) {
           diag.error = String(err)
@@ -757,6 +934,9 @@ window.__ModuleLoader__.load({
       const set = (text) => {
         ensureStyle()
         ensureLayer()
+        ensureModalWatch()
+        // 重新确保一次弹框态（layer 可能刚被重建，属性丢了）。
+        syncModal()
         active = true
         currentText = String(text ?? '')
         scheduleRender()
@@ -782,6 +962,10 @@ window.__ModuleLoader__.load({
 
       const dispose = () => {
         clearReading()
+        if (modalObserver) {
+          try { modalObserver.disconnect() } catch { /* 忽略 */ }
+          modalObserver = null
+        }
         if (layer) { layer.remove(); layer = null }
         const style = doc.querySelector(`style[data-plugin-css="${STYLE_ID}"]`)
         if (style) style.remove()
@@ -995,6 +1179,29 @@ window.__ModuleLoader__.load({
        * 是另一种「无声」，光看 ttsFailures 会漏掉。
        */
       const playSkippedRef = useRef(0)
+      /**
+       * 正在播放的句子所属自然段（宿主给的 `para`；-1 表示未知/老宿主）。
+       * 安全网裁剪时整段保护它：正在播的段落不能只留段首、把剩下的裁掉。
+       */
+      const playingParaRef = useRef(-1)
+      /**
+       * 已处理过的句子去重键（`${turnId}:${index}`）。
+       *
+       * 宿主重复广播同一条 sentence（重连补发、重复 emit）时不能让同一句重播。
+       * 有界：超过 MAX_SEEN_SENTENCE_KEYS 就丢掉最早插入的（Set 保持插入顺序）。
+       */
+      const seenSentenceKeysRef = useRef(null)
+      if (!seenSentenceKeysRef.current) seenSentenceKeysRef.current = new Set()
+      /** 已发出的 reading-ack 条数（诊断用：宿主流控是否真的在跑）。 */
+      const acksSentRef = useRef(0)
+      /** 因**安全网裁剪**而被丢掉的句子数（诊断用；正常应为 0，>0 说明宿主流控失效）。 */
+      const trimmedRef = useRef(0)
+      /**
+       * 因**非裁剪**原因被丢掉的句子数（无 AudioContext 时清队列 / 管道异常退出剩的 inflight）。
+       * 与 trimmed 分开计数：这两类丢弃与「宿主流控是否失效」无关，
+       * 混在一起会让诊断误判（评审 P3）。
+       */
+      const droppedRef = useRef(0)
 
       const pendingSendTimerRef = useRef(null)
       // 生成期间说的话：先留在草稿，等这轮结束后自动发送
@@ -1002,13 +1209,108 @@ window.__ModuleLoader__.load({
       /** 「助手忙完后自动发送」的定时器（不放 effect 里，避免被 cleanup 清掉）。 */
       const pendingAutoSendTimerRef = useRef(null)
       /**
+       * 朗读进度回执：告诉宿主「这一句已经被消费（开始播 / 被跳过 / 被丢弃）」。
+       *
+       * 宿主的流控是「已发未确认句数 <= READ_ALOUD_LEAD(3)」：客户端每回执一条，
+       * 宿主才补发下一句。所以**每一条收到的 sentence 最终都必须恰好回执一次** ——
+       * 漏回执的话宿主会一直等到 watchdog（ACK_STALL_MS=10 秒）才继续，朗读明显变慢。
+       *
+       * 回执时机的分类：
+       *   1. 开始播放前（decoded 有效、调 play 之前）—— 播放是串行且很长的
+       *      （一句 2~3 秒），等播完才回执宿主会一直等我们；
+       *   2. 句子被跳过（合成失败 / 超时 / 代次失效 / 播放上下文跳过）——
+       *      不会出声，但配额必须归还；
+       *   3. 入队前就被丢掉（去重命中 / 轮次不匹配 / 被静音 / 朗读开关已关）；
+       *   4. 安全网裁剪、haltSpeaking 清队列 —— 按条数整批归还。
+       *
+       * `sessionId`/`turnId` 优先取**事件 payload 里的**：宿主的配额按
+       * session+turn 记账，用本地 ref 在换轮边界上容易记错账。
+       *
+       * count 单次上限 64（宿主按 int 累加，防异常大数）；超过就分多批发。
+       * 失败只忽略、不重试、不阻塞播放：宿主收不到回执会自己降级回 400ms
+       * 时间窗口节奏（这也是老客户端的兼容路径）。
+       *
+       * `durationMs`（可选，仅 count=1 时有意义）：这一句的**真实音频时长**。
+       * 宿主用它精确估算「正在播放的剩余时长」来算追赶预算；不传就退回按字数估算。
+       *
+       * @param {string} sessionId - 句子所属会话。
+       * @param {string} turnId - 句子所属轮次（宿主按轮次记账）。
+       * @param {number} [count] - 回执条数（默认 1）。
+       * @param {number} [durationMs] - 真实音频时长（毫秒，可选）。
+       */
+      const ackReading = useCallback((sessionId, turnId, count = 1, durationMs = undefined) => {
+        const total = Number.isFinite(count) ? Math.max(1, Math.trunc(count)) : 1
+        acksSentRef.current += total
+        const sid = sessionId ?? ''
+        const tid = turnId ?? ''
+        const dur = Number(durationMs)
+        const hasDur = total === 1 && Number.isFinite(dur) && dur > 0
+        for (let left = total; left > 0; left -= 64) {
+          const n = Math.min(left, 64)
+          try {
+            void fetch(`${BASE}/reading-ack`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(hasDur
+                ? { sessionId: sid, turnId: tid, count: n, durationMs: Math.round(dur) }
+                : { sessionId: sid, turnId: tid, count: n }),
+            }).catch(() => { /* 老宿主没有这个端点（404）→ 忽略，宿主会降级 */ })
+          } catch { /* fetch 本身同步抛错（极少）：朗读不能因此中断 */ }
+        }
+      }, [])
+      /**
+       * 把一批**已入队但不会再播**的句子按 (sessionId, turnId) 分组回执。
+       *
+       * 用于：安全网裁剪 / haltSpeaking 清队列 / 管道异常退出。
+       * 这些句子在宿主账上都是「已发未确认」，不回执宿主会等 watchdog（10 秒）。
+       * 按句子自己的 sessionId/turnId 记账（宿主按 session+turn 计数）——
+       * turn-begin 里会先换轮次再清队列，用 currentTurnIdRef 会记到新轮上。
+       *
+       * @param {Array<{sessionId?: string, turnId?: string}>} items - 被丢弃的队列项。
+       * @returns {number} 实际回执条数（拿不到 sessionId/turnId 的项跳过）。
+       */
+      const ackDroppedItems = useCallback((items) => {
+        if (!Array.isArray(items) || !items.length) return 0
+        const groups = new Map()
+        for (const item of items) {
+          const sid = item?.sessionId || sessionIdRef.current || ''
+          const tid = item?.turnId || currentTurnIdRef.current || ''
+          // 拿不到 sessionId/turnId 就不回执：宿主下一轮会重置，硬回执反而记错账。
+          if (!sid || !tid) continue
+          const key = sid + '\u0000' + tid
+          const group = groups.get(key)
+          if (group) group.count += 1
+          else groups.set(key, { sid, tid, count: 1 })
+        }
+        let acked = 0
+        for (const group of groups.values()) {
+          ackReading(group.sid, group.tid, group.count)
+          acked += group.count
+        }
+        return acked
+      }, [ackReading])
+      /**
        * 停止并清空所有正在进行的朗读。
        * 同一时刻只能有一个朗读在播，否则新旧内容会重叠。
+       *
+       * 清队列时必须把清掉的条数回执掉（见 ackDroppedItems）：
+       * 那些句子在宿主账上是「已发未确认」，不回执宿主会等 watchdog。
+       *
        * @param {boolean} clearQueue - 是否同时清空待播队列。
        */
       const haltSpeaking = useCallback((clearQueue = true) => {
         speakGenRef.current += 1
-        if (clearQueue) speakQueueRef.current.length = 0
+        // 正在播的段落一并失效：裁剪保护不能指向一段已经不播的内容。
+        playingParaRef.current = -1
+        if (clearQueue) {
+          const pending = speakQueueRef.current
+          if (pending.length) {
+            // 先留一份给回执（清空后原数组内容就没了），再清空队列。
+            const dropped = pending.slice(0)
+            speakQueueRef.current.length = 0
+            ackDroppedItems(dropped)
+          }
+        }
         // 停掉**所有**正在播的源。
         //
         // 以前只调 speakCancelRef 这一个句柄，而它有两个漏：
@@ -1029,7 +1331,7 @@ window.__ModuleLoader__.load({
         setSpeaking(false)
         // 朗读被打断/停止/新一轮：同步清掉高亮。
         readingHighlightRef.current?.clear()
-      }, [])
+      }, [ackDroppedItems])
       /** 我们最后一次写进草稿的内容：用来区分「我们的残留」和「用户自己打的字」。 */
       const lastWrittenRef = useRef('')
 
@@ -1239,6 +1541,14 @@ window.__ModuleLoader__.load({
           ttsFailures: ttsFailuresRef.current,
           // 播放阶段因上下文无法恢复而被跳过的句子数（合成成功但没播出来）。
           playSkipped: playSkippedRef.current,
+          // 朗读流控（reading-ack）：ack 是宿主补发下一句的凭据。
+          //   acks    —— 已发出的回执条数（为 0 而宿主一直发来句子 → 流控没跑）
+          //   trimmed —— **安全网裁剪**掉的句数（正常应为 0；>0 说明宿主流控失效）
+          //   dropped —— 其它原因丢掉的句数（无 AudioContext 清队列 / 管道异常剩余，
+          //              与流控无关；排查时别和 trimmed 混为一谈）
+          acks: acksSentRef.current,
+          trimmed: trimmedRef.current,
+          dropped: droppedRef.current,
           // 播放上下文的真实状态（「朗读中但没声音」最需要的三项）：
           //   audioState —— running / suspended / closed（suspended 就播不出声）
           //   audioRate  —— 实际协商到的采样率
@@ -1633,7 +1943,12 @@ window.__ModuleLoader__.load({
           // 导致代次在工具调用之间被刷新。现在宿主只在真正的新一轮才广播，
           // 代次就只会在「用户发起新一轮」「用户插话」「关闭朗读」时变化，
           // 此时丢弃旧音频正是想要的。
-          if (gen !== speakGenRef.current) return
+          if (gen !== speakGenRef.current) {
+            // 代次已失效（被打断 / 换轮）：这句不会出声。
+            // 它是「被跳过」，要留痕 —— 以前静默 return，诊断里看不出来。
+            playSkippedRef.current += 1
+            return
+          }
           if (!decoded) return
           // 播放上下文可能因浏览器自动播放策略而处于 suspended。
           // 之前 getPlayCtx() 里 resume() 是**发后不管**的（.catch(() => {})），
@@ -1653,11 +1968,21 @@ window.__ModuleLoader__.load({
               // 先发一次 resume，再轮询。
               try { await playCtx.resume() } catch { /* 可能被拒，继续轮询 */ }
               while (playCtx.state === 'suspended' && Date.now() < deadline) {
+                // 等 resume 的最多 8 秒里，用户可能点了「停止朗读」、插话或换了
+                // 新一轮（gen 变了）：必须立刻退出，绝不能再把旧句子 start 出去
+                // （点停止本身就是手势，往往让 resume 随后成功 → 旧内容照播，评审 P2）。
+                if (gen !== speakGenRef.current) break
                 await sleep(window, 100)
                 if (playCtx.state === 'suspended') {
                   try { await playCtx.resume() } catch { /* 继续 */ }
                 }
               }
+            }
+            // resume 等待结束后**再查一次代次**：进入 play 时 gen 还是有效的，
+            // 但等 resume 的这几秒里可能已被 halt/换轮；不查就会把旧句子播出来。
+            if (gen !== speakGenRef.current) {
+              playSkippedRef.current += 1
+              return
             }
             // 仍然挂起：自动播放策略彻底拒绝（无任何手势 / 浏览器禁止）。
             // 跳过这一句，但留下计数，别再「无声却查不到原因」。
@@ -1715,7 +2040,27 @@ window.__ModuleLoader__.load({
           // 卡在 true → 之后所有句子只入队不播（永久死锁）。这里取到 null
           // 就整体退出，finally 复位 pumpingRef，管道不会卡死。
           playCtx = getPlayCtx()
-          if (!playCtx) return
+          if (!playCtx) {
+            // 拿不到播放上下文 = 这一轮不可能出声。
+            //
+            // 绝不能只 `return` 了事：finally 里「队列非空 → 再 pumpQueue()」
+            // 会在队列完全不消耗的情况下**同步互递归**（每轮递归都把队列
+            // 原样带回来），一路打到栈溢出，随后 speaking 卡 true、队列再也
+            // 不消费 —— 表现是「朗读中」恒亮且彻底没声。
+            //
+            // 正确做法：清空队列（这些句子在宿主那边是「已发未确认」，
+            // 按条数回执归还配额），复位朗读状态，让用户下一次交互重试。
+            const dropped = speakQueueRef.current.splice(0, speakQueueRef.current.length)
+            if (dropped.length) {
+              // 这不是「安全网裁剪」，记 dropped（清队列原因是音频输出不可用）。
+              droppedRef.current += dropped.length
+              ackDroppedItems(dropped)
+            }
+            playingParaRef.current = -1
+            speakingRef.current = false
+            setSpeaking(false)
+            return
+          }
           // 真正的并行流水线：由独立的后台任务持续补充合成，
           // 播放循环只负责按顺序 await 已排好的 promise。
           // 之前是「await play() 然后才 pumpPrefetch()」，播放期间不补充合成，
@@ -1730,22 +2075,42 @@ window.__ModuleLoader__.load({
               // 之前这里会丢弃 gen 不符的句子，而回合开始事件每次 LLM 调用都触发，
               // 结果大量内容被静默丢弃 —— 用户听到的就是「很多没播报」。
               // 保留 sentence：播放到这句时要据此高亮「正在朗读的文本」。
+              // 保留 sessionId/turnId：回执按 (session, turn) 记账要用；
+              // 保留 para/paraStart：安全网按段裁剪要用。
               inflight.push({
                 promise: synth(item.sentence, item.gen),
                 gen: item.gen,
                 index: item.index,
+                para: item.para,
+                paraStart: item.paraStart,
+                sessionId: item.sessionId,
+                turnId: item.turnId,
                 sentence: item.sentence,
               })
             }
           }
           /**
-           * 丢掉积压，只留最新的几句。
+           * 安全网裁剪：按**整段**丢，绝不从段落中间开始播。
            *
-           * 规则在纯函数 trimBacklog 里（src/client/pure/backlog.js）：
-           * 超过上限就丢最旧的，本轮第一句不丢。
+           * 正常情况下队列被宿主流控（reading-ack）钉在 3~4 条，这里只是兜底
+           * （老宿主 / ack 丢失 / 重连 / 宿主降级回 400ms 窗口）。规则在纯函数
+           * trimBacklog 里（src/client/pure/backlog.js）：超限时从最旧的段落
+           * **整段**丢，保护「含本轮首句的段落」和「正在播放的段落」。
+           *
+           * 被丢的句子不会出声，但在宿主编账里是「已发未确认」—— 必须按条数
+           * 回执归还配额，否则宿主会一直等到 watchdog 才发现（朗读变慢甚至停）。
            */
           const trimPending = () => {
-            trimBacklog(inflight, speakQueueRef.current, MAX_PENDING)
+            const { dropped, droppedItems } = trimBacklog(
+              inflight,
+              speakQueueRef.current,
+              MAX_PENDING,
+              { playingPara: playingParaRef.current },
+            )
+            if (dropped > 0) {
+              trimmedRef.current += dropped
+              ackDroppedItems(droppedItems)
+            }
           }
           // 后台补齐：播放期间也会持续把队列里的句子送去合成
           const filler = (async () => {
@@ -1772,7 +2137,15 @@ window.__ModuleLoader__.load({
                   continue
                 }
               }
-              const { promise, gen, sentence } = inflight.shift()
+              const { promise, gen, sentence, para, sessionId: itemSid, turnId: itemTurn } =
+                inflight.shift()
+              // 一句开始消耗（播或跳过）就把它「钉」成正在播的段落：
+              // 安全网裁剪靠它整段保护，避免只播了段首、剩下的被裁掉。
+              playingParaRef.current = Number.isInteger(para) ? para : -1
+              // 回执用**句子自己的** sessionId/turnId（payload 里的），
+              // 换轮边界上用本地 ref 会把旧轮的账记到新轮上。
+              const ackSid = itemSid || sessionIdRef.current || ''
+              const ackTurn = itemTurn || currentTurnIdRef.current || ''
               // 合成要有超时兜底：宿主 /tts 挂住时（网络 stall、宿主忙、
               // 后台节流）若没有超时，await 永不 resolve → 整个朗读管道
               // 卡死（pumpingRef 卡 true，之后所有句子只入队不播）。
@@ -1781,18 +2154,52 @@ window.__ModuleLoader__.load({
                 promise,
                 sleep(window, TTS_TIMEOUT_MS).then(() => null),
               ])
-              // 合成失败的句子跳过，但不影响后面的句子
+              // 这一句「已被消耗」：要么播、要么跳过；两种情况都要回执 1 条，
+              // 把宿主配额还回去，否则宿主会以为我们还没拿到这一句。
               if (decoded) {
                 // 正在朗读的文本 → 高亮。放在 play 之前，让「朗读中」
                 // 与「高亮」严格同步；这一句播完、进入下一句时再覆盖。
-                readingHighlightRef.current?.set(sentence)
+                // 高亮是 DOM 操作（ensureStyle/ensureLayer），抛错绝不能影响
+                // 播放与回执：以前它抛错会让这一句既没播也没 ack（宿主等 watchdog），
+                // 异常还会从 pumpQueue 冲出去变成 unhandled rejection。
+                try {
+                  readingHighlightRef.current?.set(sentence)
+                } catch { /* 忽略：高亮不是关键路径 */ }
+                // ① 开始播放前回执：宿主据此补发下一句，于是播放这 2~3 秒里
+                // 下一句已经在合成（合成延迟继续被藏住），队列也不会积压。
+                // 同时把**真实音频时长**告诉宿主：宿主用它把「正在播放的剩余时长」
+                // 算进追赶预算（否则预算实际会变成「预算 + 正在念的那句」）。
+                const decodedMs = Number(decoded?.duration) > 0
+                  ? Math.round(Number(decoded.duration) * 1000)
+                  : undefined
+                ackReading(ackSid, ackTurn, 1, decodedMs)
                 await play(decoded, gen)
+              } else {
+                // ② 合成失败 / 25s 超时 / 代次失效：这句不会出声，
+                // 但配额必须归还，否则宿主要白等 watchdog。
+                ackReading(ackSid, ackTurn, 1)
               }
+              // ③ 安全网裁剪必须在**复位 playingPara 之前**跑：这一句刚播完，
+              // 它所属段落的**剩余句子**还得继续受保护 —— 否则「一段 12 句」
+              // 只会念第一句，剩下 11 句被整段裁掉（评审 P1）。
+              // 下一轮循环开头会立刻把 playingPara 设成下一句的段，保护不会过期。
               trimPending()
+              playingParaRef.current = -1
             }
           } finally {
             prefetching = false
             await filler.catch(() => {})
+            // 异常退出（例如 play 抛错）时 inflight 里可能还有已合成但没播的句子：
+            // 它们已经被宿主算作「已发未确认」，逐条归还配额，别让宿主等 watchdog。
+            // 这类丢弃不属于「安全网裁剪」，记到 dropped（不是 trimmed），
+            // 否则诊断里会误判成「宿主流控失效」。
+            if (inflight.length) {
+              const leftover = inflight.splice(0, inflight.length)
+              droppedRef.current += leftover.length
+              ackDroppedItems(leftover)
+            }
+            // 管道结束时清掉「正在播的段」这个陈旧保护值（异常退出时可能没复位）。
+            playingParaRef.current = -1
           }
         } finally {
           pumpingRef.current = false
@@ -1807,7 +2214,7 @@ window.__ModuleLoader__.load({
             readingHighlightRef.current?.clear()
           }
         }
-      }, [])
+      }, [ackReading, ackDroppedItems])
 
       /* ================= 边生成边朗读 ================= */
       // 助手是流式输出的，宿主每写完一句就广播 sentence 事件。
@@ -1905,6 +2312,9 @@ window.__ModuleLoader__.load({
             mutedTurnIdRef.current = null
             if (turnId) currentTurnIdRef.current = turnId
             turnSentenceSeqRef.current = 0
+            // 新一轮：去重带清空（key 里已经带 turnId，这里只是防长跑会话里
+            // 一直不换轮时 Set 缓慢增长；有上限兜底，不会无限涨）。
+            seenSentenceKeysRef.current.clear()
             if (configRef.current.readAloud !== true) return
             haltSpeaking(true)
           } catch { /* 忽略 */ }
@@ -1956,27 +2366,85 @@ window.__ModuleLoader__.load({
           try {
             const payload = parseEnvelope(event)
             if (!payload || !belongsToSession(payload, sessionIdRef.current)) return
+            // 回执用**事件 payload 里的** sessionId/turnId（宿主按这两项记账）。
+            // **每一条收到的 sentence 最终都必须恰好回执一次**：真正会播的由
+            // pumpQueue 在「开始播 / 被跳过」时回执，这里只负责「入队前就被
+            // 丢弃」的那些 —— 漏回执的话宿主会一直等到 watchdog（10 秒）才发下一句，
+            // 朗读就会一顿一顿地变慢。
+            const ackSid = payload.sessionId || sessionIdRef.current || ''
+            const ackTurn = typeof payload.turnId === 'string' ? payload.turnId : ''
+            const ackDropped = () => ackReading(ackSid, ackTurn, 1)
             const sentence = String(payload?.text ?? '').trim()
-            if (!sentence || configRef.current.readAloud !== true) return
-            const turnId = typeof payload?.turnId === 'string' ? payload.turnId : null
-            // 只读**当前这一轮**的句子。
-            //
-            // 上一轮的 llm/stream 可能还在跑，它的句子会在这之后才到。
-            // 混进来就会「新一轮恢复朗读，却读到了很早之前的回复内容」——
-            // 听着像是答非所问。
-            if (turnId && currentTurnIdRef.current && turnId !== currentTurnIdRef.current) return
-            if (mutedTurnIdRef.current !== null) {
-              if (mutedTurnIdRef.current === '' || !turnId || turnId === mutedTurnIdRef.current) return
+            if (!sentence || configRef.current.readAloud !== true) {
+              // 空句 / 朗读开关已关：宿主可能还在按旧配置发句 —— 归还配额。
+              ackDropped()
+              return
             }
-            // 只排队，不在句与句之间做任何轮次判断
-            const gen = speakGenRef.current
-            // index 是本轮内的第几句（宿主给的）——
-            // 用来认出「本轮的第一句」，那一句不参与积压丢弃。
+            const turnId = typeof payload?.turnId === 'string' ? payload.turnId : null
+            // index：本轮内第几句（认「首句」/ 与 turnId 组成去重键）。
             const index = Number.isInteger(payload?.index) && payload.index >= 0
               ? payload.index
               : turnSentenceSeqRef.current
+            // 只读**当前这一轮**的句子（上一轮的流还在跑时会有迟到的旧句子）。
+            // 例外：index===0 且轮次不同 = 新一轮第一句，要能穿过 muted === ''。
+            const isTurnMismatch = Boolean(turnId) && Boolean(currentTurnIdRef.current) &&
+              turnId !== currentTurnIdRef.current
+            const isNewTurnFirst = isTurnMismatch && index === 0
+            // 上一轮的迟到句子：不播，但配额照样归还。
+            if (isTurnMismatch && !isNewTurnFirst) {
+              ackDropped()
+              return
+            }
+            if (!isNewTurnFirst && mutedTurnIdRef.current !== null) {
+              if (mutedTurnIdRef.current === '' || !turnId || turnId === mutedTurnIdRef.current) {
+                // 被静音拦下的句子：不播，但配额照样归还。
+                ackDropped()
+                return
+              }
+            }
+            if (isNewTurnFirst) {
+              // 自愈：采纳新轮次、解除静音、停掉上一轮的朗读 —— 等价于收到 turn-begin。
+              // 为什么必须自愈：宿主漏发 / 本连接漏收 turn-begin 时，turnId 会永远
+              // 粘在旧轮，之后所有句子都被当成「上一轮」丢掉（表现为整轮不朗读）；
+              // 而 currentTurnIdRef 为 null 时又完全不过滤（旧轮迟到句子混进来）。
+              currentTurnIdRef.current = turnId
+              mutedTurnIdRef.current = null
+              turnSentenceSeqRef.current = 0
+              haltSpeaking(true)
+            }
+            // 段落信息（宿主流控协议新增，老宿主没有这两个字段）：
+            //   para      —— 该句所属自然段在本轮内的序号（-1 = 未知）
+            //   paraStart —— 该段第一个发出的片段（老宿主降级为 index===0）
+            // 安全网裁剪靠 para 整段丢、绝不从段落中间开始播；没有 para 时
+            // trimBacklog 会退化成「每句一段」，仍然能裁剪。
+            const para = Number.isInteger(payload?.para) && payload.para >= 0
+              ? payload.para
+              : -1
+            const paraStart = typeof payload?.paraStart === 'boolean'
+              ? payload.paraStart
+              : index === 0
+            // 去重：宿主重复广播同一条 sentence（重连补发、重复 emit）时，
+            // 同一句绝不能播两遍 —— 那正是「读完后面又读前面」的听感。
+            const key = `${turnId ?? ''}:${index}`
+            const seen = seenSentenceKeysRef.current
+            if (seen.has(key)) {
+              // 重复句：不播，但配额要归还（否则宿主等 watchdog）。
+              ackDropped()
+              return
+            }
+            seen.add(key)
+            if (seen.size > MAX_SEEN_SENTENCE_KEYS) {
+              // Set 保持插入顺序：删最早插入的那条（有界，不无限增长）。
+              const oldest = seen.values().next().value
+              if (oldest !== undefined) seen.delete(oldest)
+            }
+            // 只排队，不在句与句之间做任何轮次判断
+            const gen = speakGenRef.current
             turnSentenceSeqRef.current += 1
-            speakQueueRef.current.push({ sentence, gen, index })
+            speakQueueRef.current.push({
+              sentence, gen, index, para, paraStart,
+              sessionId: ackSid, turnId: turnId ?? ackTurn,
+            })
             void pumpQueue()
           } catch { /* 忽略 */ }
         })
@@ -2458,6 +2926,12 @@ window.__ModuleLoader__.load({
                 audioError: playCtxError,
                 ttsFailures: ttsFailuresRef.current,
                 playSkipped: playSkippedRef.current,
+                // 朗读流控：acks 不涨 = 宿主补发句子的凭据没送到；trimmed > 0 =
+                // 宿主流控失效、安全网兜底在丢句。dropped = 其它原因（无 AudioContext /
+                // 管道异常）丢的句数，与流控无关。
+                acks: acksSentRef.current,
+                trimmed: trimmedRef.current,
+                dropped: droppedRef.current,
                 lastTtsError,
                 // 朗读高亮诊断：让我能在宿主 /diagnostics 里直接看到
                 // 「为什么没高亮」（找不到容器 / 匹配数 / 矩形数 / 异常）。
@@ -3140,6 +3614,40 @@ window.__ModuleLoader__.load({
             ? React.createElement(
                 React.Fragment,
                 null,
+                // 「追赶最新」：生成远快于朗读时，最多允许落后屏幕多少秒。
+                // 超过就按整段跳到最新内容（宿主 lib/read-aloud-scheduler.js 实现）。
+                // 0 = 关闭追赶（全部朗读，长回复会越读越滞后）。
+                React.createElement(
+                  Label,
+                  null,
+                  React.createElement('span', null, t('readAloudLag')),
+                  React.createElement('input', {
+                    type: 'number',
+                    min: 0,
+                    max: 120,
+                    step: 0.5,
+                    value: config.readAloudLag ?? 7.5,
+                    onChange: (event) => {
+                      // <input type="number"> 在空串/非法内容时给的是 ''，而
+                      // `Number('')` 是 0（**不是** NaN）—— 以前清空输入框或粘贴
+                      // 非法内容会把追赶关掉（0 = 全部朗读、越读越滞后），
+                      // `: 15` 兜底几乎走不到（评审 P3）。
+                      // 现在：空/非法 → 回退默认 7.5；合法值 clamp 0..120 后按 0.5 秒取整。
+                      const raw = String(event.target.value ?? '').trim()
+                      const n = Number(raw)
+                      const next = raw === '' || !Number.isFinite(n)
+                        ? 7.5
+                        : Math.max(0, Math.min(120, Math.round(n * 2) / 2))
+                      set('readAloudLag', next)
+                    },
+                    style: inputStyle,
+                  }),
+                  React.createElement(
+                    'span',
+                    { style: { fontSize: 12, opacity: 0.7 } },
+                    t('readAloudLagHint'),
+                  ),
+                ),
                 React.createElement(
                   Label,
                   null,

@@ -79,10 +79,14 @@ check('有英文文案', /stopSpeaking: 'Stop reading'/.test(cli))
 
 console.log('\n手动静音的完整生命周期')
 const sentenceIdx = mic.indexOf("addEventListener('sentence'")
-const sentenceBlock = mic.slice(sentenceIdx, sentenceIdx + 1200)
+// 截到 handler 末尾：原来写死 1200 字符，句处理器一长（加了去重/自愈/回执）
+// 就会被截断 → 误报「没按轮判断静音」。边界按「下一个 handler 结束」找。
+const sentenceEnd = mic.indexOf('return () => source.close()', sentenceIdx)
+const sentenceBlock = mic.slice(sentenceIdx, sentenceEnd > sentenceIdx ? sentenceEnd : sentenceIdx + 6000)
 check('sentence 处理器按轮判断静音',
-  /mutedTurnIdRef\.current !== null/.test(sentenceBlock) && /turnId === mutedTurnIdRef\.current\) return/.test(sentenceBlock),
-  '静音只由 turnId 表达，没有布尔回退')
+  /mutedTurnIdRef\.current !== null/.test(sentenceBlock)
+  && /mutedTurnIdRef\.current === '' \|\| !turnId \|\| turnId === mutedTurnIdRef\.current/.test(sentenceBlock),
+  '静音只由 turnId 表达（null / \'\' / 具体轮次），没有布尔回退')
 const turnIdx = mic.indexOf("addEventListener('turn-begin'")
 const turnBlock = turnIdx >= 0 ? mic.slice(turnIdx, turnIdx + 700) : ''
 check('新一轮开始时解除静音（turn-begin）',
