@@ -584,7 +584,8 @@ Silero VAD 切段（灵敏度 0.5 / 最短语音 0.25 s / 静音断句 0.5 s / �
   最多等 8 秒。
 - 8 秒还挂起才算彻底失败，这时跳过这一句并 `playSkippedRef += 1`，
   调试快照 `__DSH_VOICE_DEBUG__().playSkipped` 能查到。
-- 回归测试：真实 `play()` 的 resume/gen 复查用仓库外 `review/client-harness.mjs` 做行为验证；
+- 回归测试：`test/client-behavior.test.mjs` 用**真实构建产物** `lib/client.js`（vm + 假 DOM/AudioContext）
+  驱动真实播放循环，覆盖 resume/gen 复查、ack 恰好一次、停止/换轮后不出声等行为；
   仓库内原 `read-aloud-resume.test.mjs` 测的是复制出来的逻辑（已与真实实现漂移），已删除。
 
 #### 朗读队列：代次机制
@@ -778,10 +779,13 @@ Silero VAD 切段（灵敏度 0.5 / 最短语音 0.25 s / 静音断句 0.5 s / �
 
 #### 改动之后
 
-- `npm test` 必须全绿（37 个文件；会先跑 `bundle-sync` 校验产物同步）。
+- `npm test` 必须全绿（38 个文件；先跑 `bundle-sync` 校验产物同步，再跑 `client-behavior` 行为回归）。
 - 需要连活插件的集成测试单独跑：`npm run test:silence -- http://127.0.0.1:<端口>`。
 - 需要跑「真加载模型」的慢集成（SenseVoice 预加载等）：`$env:DSH_VT_SLOW_TESTS=1; npm test`。
   默认套件走快速路径并显式打印 ⏭ 跳过，不会悄悄漏测。
+- 客户端行为回归在 `test/client-behavior.test.mjs`：直接加载 `lib/client.js` 产物，
+  用假 React/DOM/AudioContext 驱动真实播放循环，断言 ack 恰好一次 / 顺序 / 段落完整 /
+  停止与换轮后不出声。**改完 `src/client/` 并重建产物后一定要跑它**（形状断言测不出时序缺陷）。
 - 改完 `lib/index.js`（宿主侧）要**重启 DSH**；
   改完 `lib/client.js`（浏览器侧）要**浏览器强制刷新**。
 - 改完 `src/client/pure/` 要跑 **`npm run build:client`** 重新生成 `lib/client.js`。

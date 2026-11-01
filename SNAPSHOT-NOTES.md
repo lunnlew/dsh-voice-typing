@@ -1,6 +1,6 @@
 # dsh-voice-typing 代码快照说明
 
-版本：0.0.2 　生成时间：2026-11-01 19:45（测试精简：磁盘 52→38 个测试文件、npm test 从 51→37 项、211s→29s）
+版本：0.0.2 　生成时间：2026-11-01 19:45（测试精简：磁盘 52→39 个测试文件、npm test 从 51→38 项、211s→38s）
 
 ## 文件结构
 
@@ -292,7 +292,8 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
 - 8 秒还挂起才算彻底失败（自动播放被完全禁止），跳过这一句并
   `playSkippedRef += 1`；调试快照 `__DSH_VOICE_DEBUG__().playSkipped` 可查。
   只记 `ttsFailures` 会漏掉它——那句的**合成是成功的**，是播放被跳过了。
-- 回归测试：真实 `play()` 的 resume/gen 复查由仓库外 `review/client-harness.mjs` 行为验证；
+- 回归测试：`test/client-behavior.test.mjs` 加载真实 `lib/client.js` 产物 + 假 DOM/AudioContext
+  驱动真实播放循环（覆盖 resume/gen 复查、ack 恰好一次、停止/换轮后不出声）；
   仓库内原 `read-aloud-resume.test.mjs` 测的是复制逻辑（已删）。
   断言「resume 要 2 秒时旧逻辑丢句、新逻辑照样播」，并断言失败时最多等约 8 秒。
 
@@ -408,7 +409,7 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
 ## 回归测试
 
 ```bash
-npm test             # 37 个测试文件（不连宿主；先跑 bundle-sync）
+npm test             # 38 个测试文件（不连宿主；先跑 bundle-sync + client-behavior）
 npm run build:client # 把 src/client/pure/ 内联进 lib/client.js
 npm run check:client # 只校验产物是否最新（CI 用）
 npm run test:silence -- http://127.0.0.1:<端口>   # 静音与流式识别回归（需要宿主在运行）
