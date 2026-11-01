@@ -1,6 +1,6 @@
 {
   "name": "dsh-voice-typing",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "语音输入与对话朗读：点一下或按快捷键切换语音模式，边说边出字，离线本地识别（SenseVoice + Silero VAD），支持自定义词表、热词提示与多模型档位；回复可用 Edge 在线 / 本地神经模型 / 系统语音三种引擎朗读。",
   "keywords": [
     "dsh",
