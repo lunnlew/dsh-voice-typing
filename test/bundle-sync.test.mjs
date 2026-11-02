@@ -72,6 +72,21 @@ const PURE_DEFINITIONS = [
   ['normalizeRun', 'pure/highlight.js'],
   ['collapseWhitespace', 'pure/highlight.js'],
   ['matchInNodes', 'pure/highlight.js'],
+  // 全局语音 / AI 界面操控（v1）的两个新纯函数模块。
+  ['createVadState', 'pure/global-voice.js'],
+  ['advanceVad', 'pure/global-voice.js'],
+  ['prepareVoiceText', 'pure/global-voice.js'],
+  ['normalizeVoicePromptMode', 'pure/global-voice.js'],
+  ['validateUiAction', 'pure/ui-action-protocol.js'],
+  ['actionNeedsConfirm', 'pure/ui-action-protocol.js'],
+  ['describeUiAction', 'pure/ui-action-protocol.js'],
+  ['buildUiActionPayload', 'pure/ui-action-protocol.js'],
+  ['validateUiActionResult', 'pure/ui-action-protocol.js'],
+  // v2 通用 a11y 原语（纯判定逻辑，DOM 胶水在 main.js 里）。
+  ['isInteractiveTag', 'pure/a11y.js'],
+  ['describeInteractiveElement', 'pure/a11y.js'],
+  ['parseKeySpec', 'pure/a11y.js'],
+  ['normalizeConfirmSpeech', 'pure/a11y.js'],
 ]
 for (const [fn, file] of PURE_DEFINITIONS) {
   const count = (bundled.match(new RegExp(`function ${fn}\\b`, 'g')) || []).length
@@ -79,7 +94,8 @@ for (const [fn, file] of PURE_DEFINITIONS) {
 }
 
 console.log('\n源文件是纯的（能在 Node 里原生 import）')
-const PURE_FILES = ['pure/gate.js', 'pure/draft.js', 'pure/envelope.js', 'pure/backlog.js', 'pure/highlight.js']
+const PURE_FILES = ['pure/gate.js', 'pure/draft.js', 'pure/envelope.js', 'pure/backlog.js', 'pure/highlight.js',
+  'pure/global-voice.js', 'pure/ui-action-protocol.js', 'pure/a11y.js']
 for (const f of PURE_FILES) {
   const raw = fs.readFileSync(`${root}/src/client/${f}`, 'utf8')
   // 剥离注释后再检查 —— 注释里提到 window 是正常的

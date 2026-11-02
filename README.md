@@ -35,6 +35,8 @@ DeepSeek Harness 的**语音输入**与**对话朗读**插件。
 | --- | --- | --- |
 | **语音输入** | 你说话 → 文字自动进输入框 → （可选）自动发送 | 不想打字、手在忙、想快点说 |
 | **对话朗读** | 助手的回复自动念出来 | 不想盯着屏幕、听回复更方便 |
+| **全局语音** | 任意页面常驻语音浮层：说话直接进**当前会话**，不经过输入框；窗口内快捷键 `Ctrl+Alt+V`（macOS 还接受 `Cmd+Option+V`），窗口未聚焦时可用系统级热键（Windows 内置 helper；macOS/Linux 需可选依赖 `uiohook-napi`）；可选唤醒词「小D」待机（先说唤醒词再说命令） | 在设置页、插件页、没有输入框的地方也想开口说话；想完全不动手就喊唤醒词 |
+| **AI 界面操控** | 模型通过 `voice_ui` 工具操作界面：语义动作（切/建会话、执行命令、发消息、停止生成、侧栏、插件页、查看状态）+ 通用 a11y 原语（先拍快照，再按元素 ref 点击/输入/按键；共 14 个动作）。默认关，危险动作要确认（也可以直接说「允许/拒绝」） | 「帮我把侧栏收起来」「打开插件页」「点一下设置里的那个开关」这类界面操作 |
 
 关键特性：
 
@@ -42,6 +44,16 @@ DeepSeek Harness 的**语音输入**与**对话朗读**插件。
 - **本地离线识别**：默认用 SenseVoice 模型，复用 DSH 已装好的那份，**零下载、零密钥、断网可用**。
 - **边说边出字**：说话时文字实时回填到输入框，不用等说完。
 - **三种朗读引擎**：在线 Edge（音质最好）、本地神经模型（离线、音质接近在线）、系统语音（最快）。
+- **全局语音（不挑页面）**：打开「全局语音浮层」后，任意页面右下角常驻一个麦克风小窗，
+  识别结果直接送进**当前会话**；窗口内快捷键默认 `Ctrl+Alt+V`（macOS 额外接受 `Cmd+Option+V`）。
+- **跨平台系统级热键（可选）**：窗口未聚焦也能按 —— Windows 内置 PowerShell helper 零依赖；
+  macOS/Linux 需要可选依赖 `uiohook-napi`（macOS 另需「辅助功能」授权；Linux 走 X11，Wayland 通常不可用）。
+- **AI 界面操控（默认关）**：打开后模型可以调用 `voice_ui` 工具操作界面（14 个动作）；危险动作会先在浮层里要你确认。
+  **需要同时打开「全局语音浮层」**——动作执行器和确认条都住在浮层里。
+- **通用界面操作（v2）**：以后新增的界面功能不用再改动作协议 —— 模型先拍一张当前页面的可交互元素快照（a11y），
+  再按快照里的 `ref` 点击/输入/按键；`ref` 只在最近一次快照内有效，过期会要求重新拍。
+- **唤醒词待机（v3）**：打开全局语音后麦克风常开待机，先说唤醒词（默认「小D」）再说命令；
+  待机时识别到的环境闲聊**不会发送**；活跃 60 秒没说话自动回待机；唤醒词留空 = 关闭。
 
 ---
 
@@ -64,6 +76,9 @@ dsh plugin --profile desktop add dsh-voice-typing
 
 > 💡 **看不到麦克风按钮？** 先确认「第 3 步」的启用组合包有没有勾上，再重启一次。
 > 还不行就跳到[故障排查](#8-故障排查)。
+
+> 🧩 **macOS / Linux 的系统级热键**：需要可选依赖 `uiohook-napi`（由包管理器按 `optionalDependencies` 安装）。
+> 缺失/装不上不影响语音主功能，只影响「窗口未聚焦也能按热键」；更新插件后跑一次 `pnpm install` 并重启 DSH。
 
 ---
 
@@ -117,6 +132,12 @@ dsh plugin --profile desktop add dsh-voice-typing
 | 打断朗读、自己说话 | 直接开口说（朗读自动停） |
 | 临时不自动发送 | 关掉「识别后自动发送」，说完手动回车 |
 | 只朗读、不开语音模式 | 只勾「朗读回复」，不点麦克风 |
+| 在任意页面说话（不经输入框） | 设置里打开「全局语音浮层」，按 `Ctrl+Alt+V` 或点右下角浮层麦克风 |
+| 不按键、喊一声就说话 | 打开「全局语音浮层」，保持麦克风开着；先说唤醒词（默认「小D」）再说命令。留空唤醒词 = 关闭 |
+| 窗口未聚焦也能按热键 | 「高级与诊断」打开「系统级全局热键 helper」：Windows 直接可用；macOS/Linux 需装可选依赖 `uiohook-napi`（macOS 还要授权辅助功能） |
+| 让 AI 操作界面 | 打开「允许 AI 操控界面」**和**「全局语音浮层」，危险动作在浮层确认（也可以直接说「允许/拒绝」） |
+| 让 AI 打开插件页 / 收起侧栏 | 直接说「打开插件页」「把侧栏收起来」（走语义动作，不需要 a11y） |
+| 让 AI 点按钮/填输入框 | 先说「看看当前页面有什么」让模型 `ui_snapshot`，再按返回的元素操作；`ref` 过期就让它重新拍 |
 
 **麦克风按钮只有两个动作：**
 
@@ -127,6 +148,9 @@ dsh plugin --profile desktop add dsh-voice-typing
 
 **全局热键（`Alt+V`）**：按一下切换开/关，行为与点麦克风一致。
 热键必须带至少一个修饰键，且主键不能是单个字母（否则打字会误触发）。
+
+> 这是**输入框麦克风**的快捷键。打开「全局语音浮层」后输入框麦克风会隐藏，`Alt+V` 改为切换浮层麦克风；
+> 浮层自己的快捷键默认 `Ctrl+Alt+V`，系统级热键 helper 注册的也是这个组合。关闭浮层即恢复原来的行为。
 
 ---
 
@@ -178,6 +202,22 @@ dsh plugin --profile desktop add dsh-voice-typing
 | **识别后自动发送** | 说完是否自动发送 | 开（默认）：停顿后自动发；关：文字只留在输入框，手动回车发送。 |
 | **发送前等待（毫秒）** | 说完后再等多久才发 | 默认 `1200`。用来合并短句、避免抢话。只在「自动发送」开时显示/生效；清空会回退默认。 |
 | **语音模式快捷键** | 切换语音模式的全局热键 | 默认 `Alt+V`。格式如 `Alt+V`，改完立即生效；非法组合会阻止保存并提示。 |
+| **全局语音浮层**（`globalVoice`） | 任意页面常驻的麦克风/状态小窗：说话直接进**当前会话**，不依赖输入框 | 默认关。**打开后输入框麦克风隐藏、`Alt+V` 也改为切换浮层麦克风**（只剩一个语音入口，不会混）；并且会**自动开麦进入待机/聆听**：有唤醒词时先说唤醒词才接收命令（唤醒词留空则直接聆听）。点浮层麦克风或按下面的全局快捷键可随时开始/停止。 |
+| **全局语音快捷键**（`globalShortcut`） | 在窗口内任意页面切换全局语音 | 默认 `Ctrl+Alt+V`；macOS 还额外接受 `Cmd+Option+V`（默认组合的顺手别名）。浮层开启时上面的 `Alt+V` 也等效切换浮层；窗口未聚焦时要系统级热键 helper。 |
+| **语音文本注入方式**（`voicePromptMode`） | 识别出的文字怎么送进会话 | `排到下一轮`（默认：助手空闲时就是发一条新消息）/ `插入下一步`（助手正在生成时用 steer 插到当前这一步）。 |
+| **唤醒词**（`wakeWord`） | 全局语音浮层待机时的唤醒词：先说词，再说命令 | 默认「小D」；**留空 = 关闭**（回到 v2：说话直接发送）。建议 2~4 个字：**2 个字（如「小D」）必须精确匹配**，3 个字以上才容忍 1 个字的口音误差；只对右下角浮层生效，输入框麦克风不受影响。 |
+
+**全局语音的注意事项**：
+- 浮层开启时输入框麦克风**隐藏**，Alt+V 改为切换浮层麦克风；两个引擎在运行期也互斥（任一方开麦会停掉另一方），避免同一句话被识别两遍。
+- `globalShortcut` 同样要求至少一个修饰键；单字母主键需搭配 `Ctrl`/`Alt`/`Meta`（`Shift+V` 非法，会吞掉全局大写输入）。
+- 系统级热键：Windows 用内置 PowerShell helper（零依赖）；macOS/Linux 用可选依赖 `uiohook-napi`（macOS 需「辅助功能」授权，Linux 需 X11）。两者都要求「全局语音浮层」打开，否则辅助进程/监听会被自动回收。
+- 窗口隐藏/最小化时渲染器定时器会被 Chromium 节流：后台可靠性有限（已优先用 AudioWorklet VAD 缓解）。
+
+**唤醒词待机说明（v3）**：
+- 唤醒词 = 麦克风**常开待机**：系统会持续显示「录音中」，更耗电、也可能误唤醒；`wakeWord` 留空即可完全关闭。
+- **只对全局语音浮层生效**；输入框麦克风不受影响。
+- 待机时识别到的**非唤醒内容不会发送**（隐私：不把环境闲聊送进会话）；最多每 30 秒提示一次「待机中」。
+- 唤醒后 **60 秒**没有语音会自动回待机（避免误当常开录音）；再说一次唤醒词即可。
 
 **快捷键注意事项**：
 - 必须带至少一个修饰键（`Ctrl` / `Alt` / `Shift` / `Meta`）。
@@ -264,9 +304,26 @@ dsh plugin --profile desktop add dsh-voice-typing
 
 ### 5.7 高级与诊断
 
-设置面板最后一组**默认收起**，只提供排查入口，不含任何配置项：
+设置面板最后一组**默认收起**：放三个「高级能力」开关（AI 操控、危险动作确认、系统级热键 helper）、
+一行**只读的系统级热键状态**，以及排查入口。
 
-- `GET /dsh-voice-typing/diagnostics`：朗读调度（`lagMs`/`trimmed`/`configWarnings` 等）、各 TTS 引擎失败、模型下载状态、环境自检结果；
+| 设置 | 作用 | 怎么调 |
+| --- | --- | --- |
+| **允许 AI 操控界面**（`uiControl`） | 允许模型调用 `voice_ui` 工具操作界面（共 14 个动作）：语义动作（切/建会话、执行命令、发消息、停止生成、设置侧栏方向、打开插件页、查看状态）+ 通用 a11y 原语（`ui_snapshot` 拍快照后按 ref 点击/输入/按键） | 默认**关**。**必须同时打开「全局语音浮层」**——动作执行器与确认条都住在浮层里；只开 `uiControl` 时工具会返回 `voice_overlay_disabled`。例外：`list_sessions` 由宿主直接查会话列表，不需要浮层。提示词 section 只在 `uiControl` 打开时注册（关闭立即释放、再开重新注册），避免白占 token 又宣传一个不可用的工具。 |
+| **危险 UI 动作需要确认**（`uiConfirm`） | 切会话 / 新建会话 / 执行命令 / 发消息 / 停止生成 / a11y 点击、输入、按键前，先在浮层弹确认条 | 默认**开**。关闭后这些危险动作直接执行；只读动作（查看状态、设置侧栏、打开插件页、拍快照）永远不弹确认。点「拒绝」或**直接说「拒绝」**时回执 `confirm_denied`；说「允许/确认/可以」等同点「允许」。 |
+| **系统级全局热键 helper**（`globalHotkeyHelper`） | 窗口未聚焦/最小化也能唤起语音浮层。Windows：拉起 PowerShell 子进程注册热键（无额外依赖）；macOS/Linux：在宿主进程内加载可选依赖 `uiohook-napi` 监听系统按键 | 默认**关**；**必须同时打开「全局语音浮层」**（没有浮层消费事件时不会启动/会被回收）。Windows 失败常见于快捷键被占用、安全软件拦 PowerShell；macOS 需在「系统设置 → 隐私与安全性 → 辅助功能」授权；Linux 走 X11，Wayland 通常不可用。状态看 `/diagnostics.hotkeyHelper` 的 `enabled/status/reason`（不含 token）：Windows 启动时先 `starting`，脚本确认 `RegisterHotKey` 成功（READY）才变 `enabled`；快捷键被占用（REGISTER_FAILED）或进程提前退出 → `failed`，并会删掉含 token 的临时 `.ps1`。 |
+
+**系统级热键状态（只读，不是配置项）**：三个开关下方新增一行，显示 `未开启` / `等待注册…` / `已启用（组合键）` / `失败（原因）`
+以及识别到的平台；打开设置面板时拉一次 `/diagnostics`，保存配置后自动再拉一次，也可以点「刷新状态」手动刷新。
+诊断接口不可用时显示「未知（诊断不可用）」（不重试、不报错）；helper 开着但「全局语音浮层」没开时会额外提示「需要同时开启浮层才会生效」。
+这一行**不参与配置保存**，设置面板仍然只有 6 个折叠分区、35 个配置键、3 个开关。
+
+> 升级提示：v2 改了 `voice_ui` 工具 schema（新增 `ref` / `key` / `collapsed` 参数），宿主不会热更新工具定义 ——
+> **升级后需要重启一次 DSH**；客户端刷新一次即可。
+
+排查入口：
+
+- `GET /dsh-voice-typing/diagnostics`：朗读调度（`lagMs`/`trimmed`/`configWarnings` 等）、各 TTS 引擎失败、模型下载状态、环境自检结果；全局语音相关的 `voicePrompt`（回退注入计数与最近错误）、`uiActions`（最近 50 条界面动作：动作/结果/错误，**不含参数正文**）、`hotkeyHelper`（`enabled/status/reason/platform`，不含 token）—— 设置面板底部的只读状态行读的就是这里；
 - 浏览器调试快照 `__DSH_VOICE_DEBUG__()`：客户端播放/队列/回退/高亮等运行时状态。
 
 ---
@@ -388,6 +445,27 @@ dsh plugin --profile desktop add dsh-voice-typing
 2. 别与浏览器/系统的快捷键冲突（`Ctrl+Space`、`Ctrl+Shift+V` 等）。
 3. 确认主键不是单个字母。
 
+### 8.8 全局语音 / 系统热键不生效
+
+1. 确认「设置 → 语音交互 → 全局语音浮层」已打开并**保存**（关着时浮层根本不渲染）。
+2. 窗口内快捷键不响应：确认「全局语音快捷键」格式正确（默认 `Ctrl+Alt+V`），别和系统/浏览器快捷键冲突；设置面板正在录制快捷键时不会触发。
+3. 窗口未聚焦 / 最小化也要能按：打开「高级与诊断 → 系统级全局热键 helper」，并确认「全局语音浮层」也开着（两个开关缺一不可）。Windows 用内置 PowerShell helper（零依赖）；macOS/Linux 需要可选依赖 `uiohook-napi` —— 插件更新后跑一次 `pnpm install`（或重装插件）；缺失时不会报错崩掉，只是安静降级。设置面板「高级与诊断」底部的「系统级热键状态」行会直接显示状态/平台/失败原因（保存后自动刷新，也可点「刷新状态」）；也可以到 `GET /dsh-voice-typing/diagnostics` 看 `hotkeyHelper.enabled/status/reason/platform`：Windows 会先 `starting`，脚本输出 READY 才变 `enabled`；`REGISTER_FAILED`/提前退出 → `failed` 并清理临时脚本。常见原因：快捷键被占用、macOS 未授权「辅助功能」、Linux 在 Wayland 会话（需 X11）、安全软件拦截 PowerShell。
+4. 说话没反应：看 `/diagnostics.voicePrompt` 的 `count` / `failures` / `lastError`（客户端直发会话失败时才会走这条回退注入）；浮层本身也会显示「未找到当前会话 / 发送失败」。
+5. 窗口隐藏/最小化时识别不稳定是**已知限制**：渲染器定时器会被 Chromium 节流，优先的 AudioWorklet VAD 已缓解，但它不是系统级后台服务。
+6. **唤醒词待机**：浮层显示「待机 · 说『小D』唤醒」时，必须**先说唤醒词**再下命令；待机时的环境闲聊会被静默丢弃（每 30 秒最多提示一次）。唤醒词留空 = 关闭待机（说话直接发送）；留空后若仍显示待机，重启一次 DSH 让新配置键生效。
+7. **可选依赖 `uiohook-napi` 装不上**（无预编译二进制 / 无编译环境）：系统级热键在 macOS/Linux 上不可用，但应用内快捷键、语音、朗读全部不受影响；`/diagnostics.hotkeyHelper.reason` 会写明原因。
+
+### 8.9 AI 不执行界面动作（`uiControl`）
+
+1. 「设置 → 高级与诊断 → 允许 AI 操控界面」默认关，先打开并保存；**同时要打开「全局语音浮层」** —— 动作执行器和确认条都住在浮层里，只开 `uiControl` 时工具返回 `voice_overlay_disabled`。
+2. 危险动作（切会话/新建/执行命令/发消息/停止生成，以及 a11y 的点击/输入/按键）会弹确认条；没点「允许」就不会执行，工具收到 `confirm_denied`。
+3. **语音确认**：确认条挂着时，直接说「允许/确认/可以」或「拒绝/取消/不要」等同点按钮；这句只用于回答确认，**不会**被当成聊天消息发进会话。
+4. **a11y 通用操作**（v2）：模型会先 `ui_snapshot` 拍快照再按 `ref` 操作。若返回 `stale_ref` 说明快照已过期（页面变了/隔了太久），让它重新拍一张；`disabled` = 元素被禁用；`forbidden` = 密码框不允许代填；`unsupported` = 当前界面/DSH 版本没有对应能力（例如 `open_plugins` 需要 `pluginNavigation.openList`）。**限制**：`ui_type` 只能写文本类输入（文本/搜索/邮箱/URL/电话/数字 input、textarea、contenteditable；checkbox/radio/file/range/日期等一律 `unsupported`，readonly 也拒绝）；`ui_click` 会拒绝外链（http(s)/mailto/file/…、`target=_blank`）与 file input（`unsupported`）——a11y 只操作应用内界面。
+5. **改了工具 schema 不生效**：v2 新增了 `ref`/`key`/`collapsed` 参数，宿主工具定义不会热更新 —— 升级后**重启一次 DSH** 才生效；客户端刷新即可。
+6. 排查：`GET /dsh-voice-typing/diagnostics` 的 `uiActions`（最近 50 条：动作、`ok`、`error`，不含参数正文）；确认条与浮层状态在右下角浮层里。
+7. 只让模型「看看有哪些会话」不需要浮层（`list_sessions` 由宿主直接回答）。
+8. **多窗口**：每个动作执行前，窗口会先向宿主认领（`POST /ui-action-claim`）。只有认领成功的窗口才弹确认/执行，其它窗口**静默跳过** —— 两个窗口不会各发一条消息；认领失败/404/网络错误时也是保守跳过（宁可这次不执行，也不双执行）。
+
 ---
 
 ## 9. 技术参考（维护者/进阶）
@@ -409,12 +487,16 @@ dsh plugin --profile desktop add dsh-voice-typing
 | `GET /tts/warmup` | 预热在线 TTS 连接（本地引擎没有连接概念，直接返回） |
 | `GET /latest-message?sessionId=…` | 本轮 assistant 回复全文 |
 | `GET /busy` | 助手是否正在生成。**降级用** —— 首选是 SSE 的 `assistant-busy` 事件（零延迟），SSE 断了才回退到轮询 |
-| `GET /diagnostics` | 诊断数据（统计、忙状态、各引擎合成失败计数、下载进度、**朗读调度器状态** `readAloud[]`：`mode/outstanding/acks/emitted/stalls/lagMs/playingMs/backlogMs/budgetMs/streaming/skim/trimmed/trimmedParagraphs/trimmedSentences/truncatedParagraphs/awaitingFlush`，以及 `readAloudScheduler` 的 `rejectedAcks/lastRejectedAck`）。**不在 `/config` 里** —— 混进去会被客户端当配置回传 |
+| `GET /diagnostics` | 诊断数据（统计、忙状态、各引擎合成失败计数、下载进度、**朗读调度器状态** `readAloud[]`：`mode/outstanding/acks/emitted/stalls/lagMs/playingMs/backlogMs/budgetMs/streaming/skim/trimmed/trimmedParagraphs/trimmedSentences/truncatedParagraphs/awaitingFlush`，以及 `readAloudScheduler` 的 `rejectedAcks/lastRejectedAck`），**全局语音**的 `voicePrompt`（回退注入 `count/failures/lastAt/lastError`）、`uiActions`（最近 50 条界面动作 `{at,requestId,action,ok,error}`，不含参数正文）、`hotkeyHelper`（`enabled/status/reason/platform/tokenReady`，不含 token）。**不在 `/config` 里** —— 混进去会被客户端当配置回传 |
 | `POST /voice-session` | 客户端心跳上报（诊断用） |
+| `POST /voice-prompt` | 全局语音的**回退注入**（客户端调用）：客户端优先用 `session.prompt()` 直发，失败时才把 `{sessionId, text, mode, requestId?}` 交给宿主。宿主**只在 `sessionController` 不可用时**才回退 `agents.followup/steer`；`sessionController.prompt` 抛错 → 直接 502（不再二次注入，避免同一条语音入队两遍）。`text` trim 后 ≤4000 字；`requestId` ≤200 字符，用于幂等去重（客户端每条识别文本生成一个，直发与回退共用）。参数非法 → 400 |
+| `POST /ui-action-result` | 渲染器执行完 `ui-action` 后的回执（客户端调用）：`{requestId, ok, value?, error?}`。未知/已过期 `requestId` → 404（不静默丢弃）。多窗口时只有认领成功的窗口会回执，其它窗口静默跳过 |
+| `POST /ui-action-claim` | UI 动作**认领**（渲染器调用；JSON-only，缺 content-type 或非 JSON → 415）：`{requestId, clientId}` → 200 `{claimed:true|false}` / 400 `invalid_requestId`/`invalid_clientId` / 404 未知或已超时/已回执。第一个 client 认领成功（同一 client 重试幂等 true），其它窗口得到 false 并静默跳过 —— SSE `ui-action` 是广播，没有认领就会多窗口重复执行 |
+| `POST /hotkey` | 系统级热键回调（**仅 Windows 路径**）：**唯一调用方是 `lib/global-hotkey-helper.js` 拉起的 PowerShell 额外进程**（客户端不直接调）；请求头 `x-dsh-voice-token` 鉴权，成功广播 SSE `global-hotkey`；token 不对或 helper 未启用 → 403。macOS/Linux 的 native 热键在宿主进程内直接广播，不走 HTTP |
 | `GET/POST /config` | 读写生效配置 |
 | `GET /models` | 模型档位清单与本地状态（识别 + 合成） |
 | `POST /model` | 下载/准备指定档位 |
-| `GET /stream` | SSE：`turn-begin` / `turn-end` / `call-end` / `sentence` / `assistant-busy` / `model-progress` / `model-ready` / `model-error` |
+| `GET /stream` | SSE：`turn-begin` / `turn-end` / `call-end` / `sentence` / `assistant-busy` / `model-progress` / `model-ready` / `model-error` / **`ui-action`** / **`global-hotkey`** |
 | `POST /reading-ack` | 客户端朗读进度回报（流控）。请求体 `{sessionId, turnId, count, durationMs?}`（`durationMs` = 这一句真实音频时长，仅 count=1 时用，宿主据此精确计「正在播放的剩余时长」）：每**开始播放**一句回一条，宿主随即补发下一句。收不到 ack 时宿主自动降级为旧的 400ms 时间窗口节奏（老客户端可用） |
 
 ### 9.2 SSE 事件信封
@@ -443,6 +525,17 @@ data: {"v":3,"seq":12,"ts":1735000000000,"sessionId":"s1","text":"你好","turnI
 
 客户端据此可以：按 `sessionId` 过滤（多会话不串音）、按 `seq` 发现丢事件、
 按 `turnId` 精确到某一轮做静音。
+
+**全局语音 / AI 界面操控新增事件**（业务字段同样平铺在信封里）：
+
+| 事件 | 业务字段 | 含义 |
+| --- | --- | --- |
+| `ui-action` | `requestId`、`sessionId`、`actions:[{action, params}]`、`confirm`、`expiresAt?` | 宿主 `voice_ui` 工具下发的界面动作；`confirm` 是宿主算好的**生效值**（只读动作永远 `false`）。`expiresAt`（epoch ms，可选）与宿主工具超时**同一个 deadline**：渲染器据此拒绝迟到的确认（回执 `expired`，不执行）。渲染器执行后必须 `POST /ui-action-result` 回执 |
+| `global-hotkey` | `action`（`toggle`） | 系统级热键 helper 进程 `POST /hotkey` 后广播；`sessionId` 为 `null`（全局事件）。渲染器据此切换浮层麦克风 |
+
+> v2 之后 `ui-action` 里的 `action` 可能是 14 种之一（8 个语义动作 + 6 个 a11y 原语）；渲染器执行前仍用同一份 UI 动作协议校验，`ref` 只对最近一次快照有效。
+>
+> 多窗口：执行前必须先 `POST /ui-action-claim` 认领（`{requestId, clientId}`）；认领失败/404/网络错误一律静默跳过（不回执、不执行），由认领成功的那个窗口完成确认/执行/回执。
 
 ### 9.3 识别链路
 
@@ -480,7 +573,9 @@ Silero VAD 切段（灵敏度 0.5 / 最短语音 0.25 s / 静音断句 0.5 s / �
 | 文件 | 职责 |
 | --- | --- |
 | `lib/index.js` | 宿主侧：HTTP 路由、配置读写、模型管理、朗读调度 |
-| `lib/client.js` | 浏览器侧：麦克风按钮、VAD 断句、草稿管理、播放队列、设置面板 |
+| `lib/client.js` | 浏览器侧：麦克风按钮、VAD 断句、草稿管理、播放队列、设置面板、**全局语音浮层 + UI 动作执行器（含 v2 a11y 快照/点击/输入/按键）**（构建产物，勿手改） |
+| `lib/ui-action-protocol.js` | **UI 动作协议（宿主纯函数）**：动作枚举、每动作参数白名单/长度上限、确认策略、`ui-action` 载荷与回执校验；客户端 `src/client/pure/ui-action-protocol.js` 是逐条同构镜像 |
+| `lib/global-hotkey-helper.js` | **跨平台系统级热键 helper**：Windows 生成 PowerShell `RegisterHotKey` 脚本并拉起/回收子进程（`/hotkey` 的 token 由它生成）；macOS/Linux 动态加载可选依赖 `uiohook-napi`、在宿主进程内监听 keydown 并直接广播 SSE（不走 HTTP）。只在 `globalVoice && globalHotkeyHelper` 时启动。Windows 子进程 stdout 输出 READY 才把状态从 `starting` 置为 `enabled`（REGISTER_FAILED/提前退出 → `failed`）；退出/失败/dispose 都会删除含 token 的临时 `.ps1` |
 | `lib/asr-worker.js` | 识别工作线程（SenseVoice / Whisper / Zipformer2） |
 | `lib/tts-worker.js` | 本地神经合成工作线程（sherpa-onnx VITS） |
 | `lib/edge-tts.js` | Edge 在线朗读（共享连接 + 串行锁） |
@@ -495,7 +590,10 @@ Silero VAD 切段（灵敏度 0.5 / 最短语音 0.25 s / 静音断句 0.5 s / �
 | `lib/read-aloud-scheduler.js` | **朗读调度器**：按自然段落收集、按客户端 ack 的播放进度发句（流控），无 ack 时降级为时间窗口；事件带 `para` / `paraStart` |
 | `lib/fence-filter.js` | **流式代码围栏过滤器**（纯函数）：跨 chunk 识别 ``` / ~~~ 围栏（围栏标记本身可能被 chunk 边界切开），围栏内内容一个字都不交给朗读 |
 | `lib/tts-env.js` | 运行环境自检 |
-| `src/client/pure/*.js` | 浏览器侧的**纯函数源码**（门限状态机、草稿合并、事件信封、定时器登记表）。不依赖浏览器 API，测试可直接原生 import |
+| `src/client/pure/*.js` | 浏览器侧的**纯函数源码**（门限状态机、草稿合并、事件信封、定时器登记表、全局语音 VAD、UI 动作协议、a11y 原语）。不依赖浏览器 API，测试可直接原生 import |
+| `src/client/pure/global-voice.js` | 全局语音纯逻辑：VAD 分段状态机（AudioWorklet 内联同一份源码）、识别文本归一化/限长、注入模式归一化、**唤醒词匹配**（`matchWakeWord`：开头锚定 / 语气词标点容错 / ≥3 字时 1 字容错，2 字必须精确）、**快捷键平台别名**（`effectiveShortcut`：macOS 默认组合额外接受 `Cmd+Option+V`） |
+| `src/client/pure/ui-action-protocol.js` | 客户端 UI 动作协议镜像（与宿主逐条同构，测试用同一张用例表跑两端） |
+| `src/client/pure/a11y.js` | **v2 通用 a11y 原语（纯函数）**：可交互元素描述与 `ref`、按键字符串解析（`parseKeySpec`）、语音「允许/拒绝」识别（`normalizeConfirmSpeech`）；DOM 胶水在 `main.js` |
 | `scripts/bundle-client.mjs` | 把 `src/client/pure/` 内联进 `lib/client.js`（浏览器模块的 require 只能解析包名，不能 import 本地相对路径，所以纯函数只能有一份源码） |
 
 ### 9.7 维护者须知
@@ -840,9 +938,79 @@ GPT-SoVITS 是 PyTorch 推理体系（官方只提供 `api_v2.py` HTTP 服务）
 - 流式 transducer 必须用 `OnlineRecognizer` + `isReady`/`decode`/`inputFinished`。
 - 离线模型才用 `OfflineRecognizer`。
 
+#### 唤醒词待机：常开麦的边界
+
+v3 的唤醒词让全局语音可以「不操作」，代价是麦克风常开，边界必须写死：
+
+**规则**
+
+- 待机（默认）时**只认开头附近的唤醒词**：`matchWakeWord` 先剥语气词/标点再做开头锚定，
+  不允许句中任意位置匹配。**≥3 字**才允许 1 个字容错（同音/口音）；**2 字（默认「小D」）必须精确匹配** ——
+  否则「小区门口」会被误唤醒成命令「门口」，还会吞掉命令首字（评审 P1-1）；单字同样不容错。
+- 待机时非唤醒内容**一律丢弃**（不发送；最多每 `WAKE_HINT_MS` = 30s 提示一次），这是隐私边界。
+- 唤醒后进入活跃态，每句话直接发送并顺延 `WAKE_ACTIVE_MS` = 60s；到期自动回待机。
+- 唤醒词**只对全局语音浮层生效**；输入框麦克风完全不受影响。
+- 语音确认条**优先于**唤醒词：确认条挂着时说「允许/拒绝」直接回答确认，不需要先喊唤醒词。
+- 关麦 / 点浮层麦克风 / 快捷键关闭都会回到待机；再开麦也从待机开始（有唤醒词时）。
+
+#### 跨平台系统级热键：平台矩阵与可选依赖
+
+系统级热键（窗口未聚焦也能按）分两条实现；**应用内快捷键（窗口聚焦）三平台都可用**：
+
+| 平台 | 实现 | 依赖 / 授权 | 已知限制 |
+| --- | --- | --- | --- |
+| Windows | PowerShell 子进程 + C# `RegisterHotKey` → `POST /hotkey`（token）→ 宿主广播 SSE | 无额外依赖 | 快捷键被占用 / 安全软件拦 PowerShell 时失败，原因进 `/diagnostics.hotkeyHelper` |
+| macOS | 宿主进程内 `uiohook-napi` 监听 keydown → 直接广播 SSE | 可选依赖 `uiohook-napi` + **辅助功能授权**（系统设置 → 隐私与安全性 → 辅助功能） | 未授权 → `failed` 原因可查；native 监听按配置值（默认 Control+Option+V），窗口内才额外接受 `Cmd+Option+V` 别名 |
+| Linux | 同上（uiohook-napi） | 可选依赖 `uiohook-napi`；需 **X11** 会话 | Wayland 下 libuiohook 通常拿不到全局按键，会降级并把原因写进 `reason` |
+
+**规则**
+
+- helper 只在 `globalVoice === true && globalHotkeyHelper === true` 时启动；关掉任一开关都会回收子进程/注销 hook。
+- `uiohook-napi` 是 **optionalDependency**：装不上不报错、不影响语音主链路，只在 `/diagnostics.hotkeyHelper` 记 `failed/reason`。
+- 快捷键解析：单字母/数字主键必须搭配 `Ctrl`/`Alt`/`Meta`（`Shift+V` 非法，会吞掉全局大写输入）。
+- macOS 的 `Cmd+Option+V` 只是**窗口内**默认组合的顺手别名；系统级 native 热键按配置值注册。
+- **Windows 启动状态机**：spawn 后先 `starting`；脚本在 `RegisterHotKey` 成功后向 stdout 打印 `READY` → `enabled`；stderr 输出 `REGISTER_FAILED`（快捷键被占用）、或在 READY 前退出 → `failed` + 原因。含 token 的临时 `.ps1` 在退出/失败/dispose 时删除（不再依赖下次 sync）。
+- 诊断里的 helper 状态形状：`{enabled, status, reason, platform, tokenReady}`；`status` 会经历 `idle/loading/starting/enabled/exited/failed/disabled`，**enabled=false 不等于没配置**，先看 `reason`。
+
+#### 幽灵动作：`expiresAt` 截止时间
+
+宿主 `voice_ui` 工具等待回执有超时（默认 20s）。`ui-action` 载荷带 `expiresAt`（与宿主超时同一个 deadline），客户端必须：
+
+- 收到时已过期 → 直接回执 `{ok:false,error:'expired'}`，**不弹确认、不执行**（提示「动作已超时，未执行」）。
+- 确认条计时器 = `min(30s, expiresAt-now-1s)`；用户点「允许」后、执行前**再检查一次** deadline，过期同样回 `expired`。
+- 杜绝 ghost action：宿主已判失败（模型收到 `ui_timeout`）后，用户迟到的「允许」不能再真的发出消息/执行命令。
+- 卸载/热重载时宿主会立刻收尾所有在途动作（`ui_timeout`）并清定时器。
+
+#### 多窗口：单一执行者与请求去重
+
+SSE `ui-action` 是**全量广播**：两个 DSH 窗口（或同应用两个标签页）都会收到同一个动作。不处理的话 `send_prompt` 会被执行两次。
+
+**规则**
+
+- 执行前必须先 `POST /ui-action-claim` 认领：`{requestId, clientId}`；第一个 client 得 `claimed:true`，其它窗口 `claimed:false`。
+- 认领失败 / 404 / 网络错误一律**静默跳过**（不回执、不执行）：宁可这次不执行，也不能双执行；另一个窗口会回执，都不在则由宿主超时收尾。
+- `clientId` 存 sessionStorage（同标签页稳定、多标签页不同；无痕/被禁用时回落 localStorage/内存），只用于认领，不含敏感信息。
+- **请求去重**：客户端每条识别文本生成一个 `requestId`，直发 `session.prompt(parts, mode, undefined, requestId)` 与回退 `POST /voice-prompt` 共用它；宿主据此幂等（重试/回退不会把同一条语音注入两遍）。
+- `/voice-prompt` 兜底只在 `sessionController` 缺失时启用；controller 抛错直接 502，不再 followup（防止主路径已入队后重复注入）。
+
+#### 通用 a11y 操作：快照 ref 是唯一入口
+
+v2 的 `ui_click` / `ui_type` / `ui_key` 能操作任意可见元素，等价于用户亲手操作，安全边界必须写死：
+
+**规则**
+
+- **只认快照下发的 ref**：ref 只能来自最近一次 `ui_snapshot` 维护的 `Map(ref → element)`；
+  过期/找不到一律回 `stale_ref`，让模型重新拍快照 —— 绝不接受 CSS 选择器、DOM 路径或坐标。
+- **新快照整体覆盖旧表**并清掉旧 DOM 标记：不会出现「上一页的同名 ref 点到这一页」。
+- 三个原语默认**危险**（`uiConfirm` 开时弹确认）；密码框（`type=password`）永远禁止代填（`forbidden`）。
+- `ui_type` 只写**文本类**目标：`text/search/email/url/tel/number` input、`textarea`、`contenteditable`（含 `plaintext-only`）；`checkbox/radio/file/range/color/date/hidden/...` → `unsupported`（避免原生 setter 被吞掉却报成功），`readonly` → `unsupported`。
+- `ui_click` 拒绝**外链导航**与**文件选择器**：`http(s)/mailto/file/tel/ftp/data/javascript/blob`、协议相对 `//`、`target=_blank`、`input[type=file]` → `unsupported`；应用内锚点（`#…`）与相对路由允许 —— a11y 只操作应用内界面，点出去浮层会随页面消失而会话还在跑。
+- `set_sidebar` 读不到 `[data-sidebar-collapsed]` 时回 `unknown_state`，**不盲切方向**。
+- 语音确认只认**整句**「允许/拒绝」（去首尾标点）；不是确认词就照常当聊天内容发送。
+
 #### 改动之后
 
-- `npm test` 必须全绿（42 个文件；先跑 `bundle-sync` 校验产物同步，再跑 `client-behavior` 行为回归）。
+- `npm test` 必须全绿（48 个文件；先跑 `bundle-sync` 校验产物同步，再跑 `client-behavior` 行为回归）。
 - 需要连活插件的集成测试单独跑：`npm run test:silence -- http://127.0.0.1:<端口>`。
 - 需要跑「真加载模型」的慢集成（SenseVoice 预加载等）：`$env:DSH_VT_SLOW_TESTS=1; npm test`。
   默认套件走快速路径并显式打印 ⏭ 跳过，不会悄悄漏测。
@@ -853,6 +1021,11 @@ GPT-SoVITS 是 PyTorch 推理体系（官方只提供 `api_v2.py` HTTP 服务）
   改完 `lib/client.js`（浏览器侧）要**浏览器强制刷新**。
 - 改完 `src/client/pure/` 要跑 **`npm run build:client`** 重新生成 `lib/client.js`。
   `npm test` 里的 `bundle-sync.test.mjs` 会检查产物是否同步。
+- 改了可选依赖（如 `uiohook-napi`）要跑 **`pnpm install`** 同步 `pnpm-lock.yaml`；`node_modules` 不入库，CI 按 lockfile 恢复；装好后**重启一次 DSH** 才会加载新的原生模块。
+- `package.json` 声明了 `engines.dsh: ">=0.2.1-rc.5"` 与 **optional peer** `@deepseek-ai/dsh-llm`（仅 `agents.followup` 兜底用，由 DSH 安装环境提供；`peerDependenciesMeta.optional=true`）。
+- 本仓库 `pnpm-lock.yaml` 用默认 `autoInstallPeers=true` 生成：锁文件会记录 `dsh-llm` 的依赖图，但**本地 `node_modules` 不一定有**它（`--lockfile-only` 更新后只改锁文件；测试用 `setCreateUserMessageLoaderForTest` 注入，不 require 真模块）。
+- **暂不添加 `.npmrc auto-install-peers=false`**：那会改变现有 peer（如 `@deepseek-ai/cordis`）的自动安装行为并要求重算锁文件，属于独立改动；当前状态对运行时/测试无影响。如需收紧另开改动并在 CI（`pnpm install --frozen-lockfile`）验证。
+- 更新插件依赖/新增可选 peer 后跑 `pnpm install --lockfile-only`（或 `pnpm install`）保持锁文件同步。
 
 #### 配置项的配合关系（生效条件矩阵）
 
@@ -873,6 +1046,13 @@ GPT-SoVITS 是 PyTorch 推理体系（官方只提供 `api_v2.py` HTTP 服务）
 | `preloadModels` × `idleReleaseMinutes` | 预加载只覆盖 model/neural（不覆盖 liveAsr 的 zipformer2）；idle 释放不释放当前选中模型；`0`=永不释放 |
 | `sovits*` | 只对 `ttsEngine=sovits` 生效；`sovitsRefAudio` 是**服务端机器**可访问路径（官方 api_v2 每请求必填），留空则不带该字段由服务端决定 |
 | `words` | 热词仅 zipformer2（transducer）生效；按行保存，保存时 trim/去空 |
+| `globalVoice` | 全局语音浮层总开关。关 = 浮层不渲染、不建 SSE 连接、界面动作执行器不存在 |
+| `globalShortcut` | 窗口内全局语音快捷键（helper 也用它注册系统级热键）；格式规则同 `shortcut`（至少一个修饰键；单字母需 Ctrl/Alt/Meta） |
+| `voicePromptMode` | 语音文本注入方式：`queue`（下一轮）/ `steer`（当前轮下一步） |
+| `uiControl` | AI 界面操控总开关（默认关）。**需要 `globalVoice=true` 才有执行器**；关闭时 `voice_ui` 返回 `ui_control_disabled`。v2 共 14 个动作（8 个语义 + 6 个 a11y 原语），新增界面功能不再需要改协议 |
+| `uiConfirm` | 危险动作确认（默认开）：切会话/新建/命令/发消息/停止生成 + a11y 点击/输入/按键。只读动作不受影响；用户点「拒绝」或说「拒绝」回执 `confirm_denied`（说「允许」等同点允许） |
+| `globalHotkeyHelper` | 拉起跨平台系统级热键（默认关）：Windows 内置 PowerShell helper；macOS/Linux 需可选依赖 `uiohook-napi`（macOS 授权辅助功能、Linux 需 X11）。**还要求 `globalVoice=true`**（没有浮层消费事件时不启动）。失败不影响窗口内快捷键，原因进 `/diagnostics.hotkeyHelper`（`enabled/status/reason`） |
+| `wakeWord` | 全局语音待机唤醒词（默认「小D」；空串 = 关闭）。只对浮层生效；待机时非唤醒内容不发送；活跃 60s 无语音回待机（客户端常量 `WAKE_ACTIVE_MS` / `WAKE_HINT_MS`） |
 
 #### CI 与自动发布（GitHub Actions）
 

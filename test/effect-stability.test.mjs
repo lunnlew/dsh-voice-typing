@@ -185,7 +185,10 @@ check('每个 useEffect 都能解析出依赖数组（解析不了就失败，�
     if (!host) continue
     const body = src.slice(host.start, host.end + 1)
     check(`行 ${line} 的 EventSource 在所属 effect 的 cleanup 里被 close()`,
-      /return \(\) => source\.close\(\)/.test(body),
+      // 允许两种写法：`return () => source.close()`，以及带清理逻辑的
+      // `return () => { …; source?.close?.() }`（重连实现需要先置 disposed、
+      // 清重连定时器，再关连接，不能写成一行裸 close）。
+      /return \(\) =>[\s\S]{0,500}?close\s*\??\.?\s*\(/.test(body),
       '不关的话组件卸载后连接还在，事件会打到已卸载的组件上（要求按 effect 边界匹配，不再用 250 行窗口）')
   }
 }

@@ -9,12 +9,16 @@
  *   - words（字符串 trim、对象 {correct,replace} 归一化、去空、上限）；
  *   - sanitizeConfig：非法值回退默认 + warnings、越界 clamp、未知键忽略、输出键完整；
  *   - validateConfigPatch：错误聚合、未知键忽略、空串合法、数字字符串强转；
- *   - normalizeTtsEngine：trim/小写/非法返回 ''（绝不默认 online）。
+ *   - normalizeTtsEngine：trim/小写/非法返回 ''（绝不默认 online）；
+ *   - 全局语音 / AI 界面操控的 6 个新键（globalVoice、globalShortcut、
+ *     voicePromptMode、uiControl、uiConfirm、globalHotkeyHelper）：
+ *     类型/枚举归一、默认回退、严格校验。
  *
  * 运行：node test/config-schema.test.mjs
  */
 import {
   TTS_ENGINES,
+  VOICE_PROMPT_MODES,
   CONFIG_SPEC_KEYS,
   MAX_WORDS,
   MAX_WORD_CHARS,
@@ -60,15 +64,30 @@ const DEFAULTS = {
   shortcut: 'Alt+V',
   idleReleaseMinutes: 10,
   preloadModels: true,
+  // 全局语音 / AI 界面操控（v1）的 6 个新键。
+  globalVoice: false,
+  globalShortcut: 'Ctrl+Alt+V',
+  voicePromptMode: 'queue',
+  uiControl: false,
+  uiConfirm: true,
+  globalHotkeyHelper: false,
+  // v3：全局语音待机唤醒词（空串 = 关闭）。
+  wakeWord: '小D',
 }
 
-console.log('== 0. schema 覆盖 28 个配置键 ==')
-check('schema 键数为 28', CONFIG_SPEC_KEYS.length === 28, String(CONFIG_SPEC_KEYS.length))
+console.log('== 0. schema 覆盖 35 个配置键 ==')
+check('schema 键数为 35', CONFIG_SPEC_KEYS.length === 35, String(CONFIG_SPEC_KEYS.length))
 check('DEFAULTS 与 schema 键集合一致（无遗漏/多余）',
-  Object.keys(DEFAULTS).length === 28 &&
+  Object.keys(DEFAULTS).length === 35 &&
   Object.keys(DEFAULTS).every((key) => CONFIG_SPEC_KEYS.includes(key)) &&
   CONFIG_SPEC_KEYS.every((key) => key in DEFAULTS),
   JSON.stringify({ defaults: Object.keys(DEFAULTS), spec: CONFIG_SPEC_KEYS }))
+check('新增的 6 个键都在 schema 里',
+  ['globalVoice', 'globalShortcut', 'voicePromptMode', 'uiControl', 'uiConfirm', 'globalHotkeyHelper']
+    .every((key) => CONFIG_SPEC_KEYS.includes(key)),
+  CONFIG_SPEC_KEYS.join(','))
+check('v3 唤醒词在 schema 里（第 35 个键）',
+  CONFIG_SPEC_KEYS.includes('wakeWord'), CONFIG_SPEC_KEYS.join(','))
 
 console.log('\n== 1. normalizeTtsEngine ==')
 for (const [input, expect] of [
@@ -88,6 +107,8 @@ for (const [input, expect] of [
 }
 check('非法引擎不会默认成 online（审计 D1 的根因）', normalizeTtsEngine('bogus') === '')
 check('TTS_ENGINES 含 sovits', TTS_ENGINES.includes('sovits'))
+check('VOICE_PROMPT_MODES 含 queue/steer', JSON.stringify(VOICE_PROMPT_MODES) === JSON.stringify(['queue', 'steer']),
+  JSON.stringify(VOICE_PROMPT_MODES))
 
 console.log('\n== 2. sanitizeConfig：枚举/布尔/数值/字符串/URL/words ==')
 {
@@ -107,6 +128,14 @@ console.log('\n== 2. sanitizeConfig：枚举/布尔/数值/字符串/URL/words =
     sovitsUrl: 'ftp://x',
     sovitsTextLang: 'auto',
     sovitsPromptLang: 'EN',
+    // 新键：布尔传非布尔、字符串带空白、枚举传大写。
+    globalVoice: 'yes',
+    globalShortcut: '  Ctrl+Alt+V  ',
+    voicePromptMode: 'STEER',
+    uiControl: 1,
+    uiConfirm: 'nope',
+    globalHotkeyHelper: 0,
+    wakeWord: 123,
     words: ['  热词  ', '', 42, { correct: '正确', replace: '错误' }, { correct: ' ' }],
   }, DEFAULTS)
   const byKey = Object.fromEntries(warnings.map((w) => [w.key, w.reason]))
@@ -123,8 +152,21 @@ console.log('\n== 2. sanitizeConfig：枚举/布尔/数值/字符串/URL/words =
   check('words 归一化（trim/去空/对象转字符串形式）',
     JSON.stringify(config.words) === JSON.stringify(['热词', '正确=错误']), JSON.stringify(config.words))
   check('非法项都有 warning', ['ttsEngine', 'autoSend', 'readAloudLag', 'model', 'sovitsUrl'].every((key) => byKey[key]))
-  check('输出包含全部 28 键（GET /config 完整性）', Object.keys(config).length === 28, String(Object.keys(config).length))
+  check('输出包含全部 35 键（GET /config 完整性）', Object.keys(config).length === 35, String(Object.keys(config).length))
   check('未知键被忽略', !('hackKey' in sanitizeConfig({ hackKey: 1 }, DEFAULTS).config))
+  // 全局语音 / AI 界面操控的新键：默认值必须是「安全默认」（开关全关、确认开）。
+  check('新布尔键严格类型并回退安全默认',
+    config.globalVoice === false && config.uiControl === false
+    && config.uiConfirm === true && config.globalHotkeyHelper === false,
+    JSON.stringify({ globalVoice: config.globalVoice, uiControl: config.uiControl, uiConfirm: config.uiConfirm, globalHotkeyHelper: config.globalHotkeyHelper }))
+  check('新布尔键非法值都有 warning',
+    ['globalVoice', 'uiControl', 'uiConfirm', 'globalHotkeyHelper'].every((key) => byKey[key]),
+    JSON.stringify(byKey))
+  check('新字符串键 trim（globalShortcut）', config.globalShortcut === 'Ctrl+Alt+V', JSON.stringify(config.globalShortcut))
+  check('新枚举大小写归一（voicePromptMode STEER→steer）', config.voicePromptMode === 'steer', JSON.stringify(config.voicePromptMode))
+  // v3 唤醒词：非字符串回退默认（不影响常开麦安全，但不能变成 "[object Object]"）。
+  check('wakeWord 非字符串回退默认「小D」并记 warning',
+    config.wakeWord === '小D' && byKey.wakeWord, JSON.stringify(config.wakeWord))
 }
 {
   const { config } = sanitizeConfig({
@@ -135,6 +177,28 @@ console.log('\n== 2. sanitizeConfig：枚举/布尔/数值/字符串/URL/words =
   check('空 URL 回退默认地址', config.sovitsUrl === DEFAULTS.sovitsUrl)
   check('字符串 trim', config.voice === '')
   check('words 字符串 trim', JSON.stringify(config.words) === JSON.stringify(['a', 'b']))
+}
+{
+  // 新枚举：非法值回退默认并记 warning（绝不静默）。
+  const { config, warnings } = sanitizeConfig({
+    voicePromptMode: 'push',
+    globalShortcut: 'x'.repeat(80),
+  }, DEFAULTS)
+  check('voicePromptMode 非法 → 回退 queue', config.voicePromptMode === 'queue', JSON.stringify(config.voicePromptMode))
+  check('voicePromptMode 非法有 warning', warnings.some((w) => w.key === 'voicePromptMode'))
+  check('globalShortcut 超长 → 截断到 64', config.globalShortcut.length === 64, String(config.globalShortcut.length))
+}
+{
+  // v3 唤醒词：默认「小D」；trim；空串合法（= 关闭）；超长截断到 32 并记 warning。
+  const def = sanitizeConfig({}, DEFAULTS).config
+  check('wakeWord 默认「小D」', def.wakeWord === '小D', JSON.stringify(def.wakeWord))
+  const trimmed = sanitizeConfig({ wakeWord: '  小D  ' }, DEFAULTS).config
+  check('wakeWord trim（「  小D  」→「小D」）', trimmed.wakeWord === '小D', JSON.stringify(trimmed.wakeWord))
+  const off = sanitizeConfig({ wakeWord: '' }, DEFAULTS).config
+  check('wakeWord 空串合法（= 关闭唤醒词）', off.wakeWord === '', JSON.stringify(off.wakeWord))
+  const long = sanitizeConfig({ wakeWord: 'x'.repeat(40) }, DEFAULTS)
+  check('wakeWord 超长截断到 32', long.config.wakeWord.length === 32, String(long.config.wakeWord.length))
+  check('wakeWord 超长有 warning', long.warnings.some((w) => w.key === 'wakeWord'))
 }
 {
   const many = Array.from({ length: MAX_WORDS + 5 }, (_, i) => 'w' + i)
@@ -160,7 +224,7 @@ console.log('\n== 2. sanitizeConfig：枚举/布尔/数值/字符串/URL/words =
 check('null/数组配置整份回退默认', (() => {
   const a = sanitizeConfig(null, DEFAULTS).config
   const b = sanitizeConfig([], DEFAULTS).config
-  return a.ttsEngine === 'online' && b.ttsEngine === 'online' && Object.keys(a).length === 28
+  return a.ttsEngine === 'online' && b.ttsEngine === 'online' && Object.keys(a).length === 35
 })())
 
 console.log('\n== 3. validateConfigPatch：严格校验 + 错误聚合 ==')
@@ -189,6 +253,15 @@ console.log('\n== 3. validateConfigPatch：严格校验 + 错误聚合 ==')
     sovitsUrl: 'http://127.0.0.1:9880',
     sovitsTextLang: 'JA',
     words: ['词', { correct: '对', replace: '错' }],
+    // 全局语音 / AI 界面操控：合法 patch 的归一化结果。
+    globalVoice: true,
+    globalShortcut: '  Ctrl+Shift+Space  ',
+    voicePromptMode: ' STEER ',
+    uiControl: true,
+    uiConfirm: false,
+    globalHotkeyHelper: true,
+    // v3 唤醒词：字符串键 trim 归一。
+    wakeWord: '  小D  ',
     unknownKey: 'ignored',
   })
   check('合法 patch 返回 ok:true', good.ok === true, JSON.stringify(good))
@@ -196,6 +269,13 @@ console.log('\n== 3. validateConfigPatch：严格校验 + 错误聚合 ==')
   check('数字字符串安全强转', good.value.readAloudLag === 15 && good.value.silenceMs === 1500 && good.value.neuralSpeaker === 2)
   check('枚举大小写归一', good.value.sovitsTextLang === 'ja')
   check('words 对象写法归一化', JSON.stringify(good.value.words) === JSON.stringify(['词', '对=错']))
+  check('新布尔键原样保留',
+    good.value.globalVoice === true && good.value.uiControl === true
+    && good.value.uiConfirm === false && good.value.globalHotkeyHelper === true,
+    JSON.stringify({ globalVoice: good.value.globalVoice, uiControl: good.value.uiControl, uiConfirm: good.value.uiConfirm, globalHotkeyHelper: good.value.globalHotkeyHelper }))
+  check('新字符串键 trim（globalShortcut）', good.value.globalShortcut === 'Ctrl+Shift+Space', JSON.stringify(good.value.globalShortcut))
+  check('新枚举大小写归一（voicePromptMode STEER→steer）', good.value.voicePromptMode === 'steer', JSON.stringify(good.value.voicePromptMode))
+  check('wakeWord trim 归一', good.value.wakeWord === '小D', JSON.stringify(good.value.wakeWord))
   check('未知键被忽略', !('unknownKey' in good.value))
 }
 {
@@ -203,6 +283,11 @@ console.log('\n== 3. validateConfigPatch：严格校验 + 错误聚合 ==')
   check('空 URL 合法（表示使用默认地址）', emptyUrl.ok === true && emptyUrl.value.sovitsUrl === '')
   const emptyVoice = validateConfigPatch({ voice: '' })
   check('空字符串对 string 键合法（清空/回退默认）', emptyVoice.ok === true && emptyVoice.value.voice === '')
+  const emptyShortcut = validateConfigPatch({ globalShortcut: '' })
+  check('全局语音快捷键空串合法（回退默认）',
+    emptyShortcut.ok === true && emptyShortcut.value.globalShortcut === '')
+  const emptyWake = validateConfigPatch({ wakeWord: '' })
+  check('wakeWord 空串合法（= 关闭唤醒词）', emptyWake.ok === true && emptyWake.value.wakeWord === '')
 }
 {
   const cases = [
@@ -212,6 +297,11 @@ console.log('\n== 3. validateConfigPatch：严格校验 + 错误聚合 ==')
     ['数值超出范围', { silenceMs: 999999 }],
     ['字符串键传数字', { model: 123 }],
     ['URL 传非字符串', { sovitsUrl: 42 }],
+    ['新布尔键传字符串', { uiControl: 'true' }],
+    ['新字符串键传数字', { globalShortcut: 42 }],
+    ['新枚举非法值', { voicePromptMode: 'push' }],
+    ['wakeWord 传数字', { wakeWord: 42 }],
+    ['wakeWord 超长（33 字）', { wakeWord: 'x'.repeat(33) }],
     ['words 非数组', { words: 'a' }],
     ['words 条目为空', { words: ['  '] }],
     ['words 超上限', { words: Array.from({ length: MAX_WORDS + 1 }, (_, i) => 'w' + i) }],

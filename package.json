@@ -54,9 +54,16 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-llm": ">=0.2.1-rc.5",
     "react": "^18.2.0"
   },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    }
+  },
   "engines": {
+    "dsh": ">=0.2.1-rc.5",
     "node": ">=22"
   },
   "license": "MIT",
@@ -73,12 +80,13 @@
     "react-dom": "18.3.1"
   },
   "scripts": {
-    "test": "node test/bundle-sync.test.mjs && node test/config-schema.test.mjs && node test/client-behavior.test.mjs && node test/sovits-tts.test.mjs && node test/atomic-file.test.mjs && node test/config-link.test.mjs && node test/config-ui.test.mjs && node test/config-writeback.test.mjs && node test/decode-guard.test.mjs && node test/download.test.mjs && node test/draft-merge.test.mjs && node test/edge-tts.test.mjs && node test/effect-stability.test.mjs && node test/event-envelope.test.mjs && node test/fence-filter.test.mjs && node test/gate-client.test.mjs && node test/gate-host.test.mjs && node test/highlight-overlay.test.mjs && node test/highlight.test.mjs && node test/listening-ready.test.mjs && node test/live-asr.test.mjs && node test/local-tts.test.mjs && node test/paragraph.test.mjs && node test/read-aloud-catchup.test.mjs && node test/read-aloud-chain.test.mjs && node test/read-aloud-fence.test.mjs && node test/read-aloud-list.test.mjs && node test/read-aloud-policy.test.mjs && node test/read-aloud-scheduler.test.mjs && node test/read-aloud-stop.test.mjs && node test/reading-ack-contract.test.mjs && node test/render.test.mjs && node test/repo-hygiene.test.mjs && node test/route-contract.test.mjs && node test/config-guard.test.mjs && node test/sensevoice-fallback.test.mjs && node test/state-reset.test.mjs && node test/timer-registry.test.mjs && node test/tts-online-fallback.test.mjs && node test/turn-boundary.test.mjs && node test/worker-fallback.test.mjs && node test/worker-protocol.test.mjs",
+    "test": "node test/bundle-sync.test.mjs && node test/config-schema.test.mjs && node test/client-behavior.test.mjs && node test/client-service-order.test.mjs && node test/sovits-tts.test.mjs && node test/atomic-file.test.mjs && node test/config-link.test.mjs && node test/config-ui.test.mjs && node test/config-writeback.test.mjs && node test/decode-guard.test.mjs && node test/download.test.mjs && node test/draft-merge.test.mjs && node test/edge-tts.test.mjs && node test/effect-stability.test.mjs && node test/a11y.test.mjs && node test/global-voice.test.mjs && node test/ui-action-protocol.test.mjs && node test/event-envelope.test.mjs && node test/fence-filter.test.mjs && node test/gate-client.test.mjs && node test/gate-host.test.mjs && node test/highlight-overlay.test.mjs && node test/highlight.test.mjs && node test/listening-ready.test.mjs && node test/live-asr.test.mjs && node test/local-tts.test.mjs && node test/paragraph.test.mjs && node test/read-aloud-catchup.test.mjs && node test/read-aloud-chain.test.mjs && node test/read-aloud-fence.test.mjs && node test/read-aloud-list.test.mjs && node test/read-aloud-policy.test.mjs && node test/read-aloud-scheduler.test.mjs && node test/read-aloud-stop.test.mjs && node test/reading-ack-contract.test.mjs && node test/render.test.mjs && node test/repo-hygiene.test.mjs && node test/route-contract.test.mjs && node test/config-guard.test.mjs && node test/voice-ui-host.test.mjs && node test/global-hotkey-helper.test.mjs && node test/sensevoice-fallback.test.mjs && node test/state-reset.test.mjs && node test/timer-registry.test.mjs && node test/tts-online-fallback.test.mjs && node test/turn-boundary.test.mjs && node test/worker-fallback.test.mjs && node test/worker-protocol.test.mjs",
     "test:silence": "node test/silence.test.mjs",
     "build:client": "node scripts/bundle-client.mjs",
     "check:client": "node scripts/bundle-client.mjs --check"
   },
   "optionalDependencies": {
-    "sherpa-onnx-node": "1.13.6"
+    "sherpa-onnx-node": "1.13.6",
+    "uiohook-napi": "^1.5.5"
   }
 }

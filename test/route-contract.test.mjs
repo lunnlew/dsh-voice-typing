@@ -64,6 +64,23 @@ for (const r of hostRoutes) {
     '既没人调也没标注 —— 要么删掉，要么写清楚它是干什么的')
 }
 
+console.log('\n全局语音 / AI 界面操控路由（v1）')
+{
+  // 这几条是 v1 新增的数据通路，必须各有唯一调用方 —— 少一条就是死链，
+  // 多一条「客户端直接调 /hotkey」就是把 helper 专用入口暴露给渲染器。
+  check('客户端调用 /voice-prompt（语音回退注入）',
+    clientRoutes.some((c) => c.split('?')[0] === '/voice-prompt'))
+  check('客户端调用 /ui-action-result（UI 动作回执）',
+    clientRoutes.some((c) => c.split('?')[0] === '/ui-action-result'))
+  check('宿主注册 /voice-prompt', hostRoutes.includes('/voice-prompt'))
+  check('宿主注册 /ui-action-result', hostRoutes.includes('/ui-action-result'))
+  check('宿主注册 /hotkey', hostRoutes.includes('/hotkey'))
+  check('/hotkey 只在 helper 进程里被调用（客户端不直接调）',
+    !clientRoutes.some((c) => c.split('?')[0] === '/hotkey'))
+  check('/hotkey 标注为 helper-only（额外进程是唯一调用方）',
+    /唯一调用方是[^\n]*global-hotkey-helper/.test(idx))
+}
+
 console.log('\n已删除的死路由不该复活')
 check('客户端不再调用 /session', !/\/session`/.test(cli))
 check('客户端不再调用 /latest-message', !/\/latest-message/.test(cli))

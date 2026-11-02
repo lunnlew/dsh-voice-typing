@@ -136,6 +136,11 @@ if (MicComponent) {
         && !/\bopen\b/.test(detailsTags[5]))
       check('短字段使用并排布局（grid auto-fit）',
         (html.match(/minmax\(220px, 1fr\)/g) || []).length >= 1)
+      // task-24：高级组新增只读「系统级热键状态」行（SSR 冒烟：不得渲染即抛错）。
+      check('设置面板含只读热键状态行（标题 + 刷新按钮）',
+        html.includes('hotkeyStatusTitle') && html.includes('hotkeyStatusRefresh'))
+      check('热键状态行位于「高级与诊断」分组内',
+        html.indexOf('hotkeyStatusTitle') > html.indexOf('>secAdvanced<'))
     } catch (error) {
       check('设置面板默认态渲染成功', false, error && error.message)
     }

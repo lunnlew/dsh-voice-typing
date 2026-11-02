@@ -106,7 +106,15 @@ console.log('\n文档里写的路由必须真实存在')
   const registered = new Set(
     [...idx.matchAll(/path: '\/dsh-voice-typing([^']*)'/g)].map((m) => m[1]),
   )
-  for (const doc of ['README.md', 'cordis.patch.yml']) {
+  const docsDir = path.join(root, 'docs')
+  // docs/ 下的设计文档也属于发布物（随 npm 包/仓库走），里面写的路由同样必须真实存在。
+  const docFiles = ['README.md', 'cordis.patch.yml']
+  if (fs.existsSync(docsDir)) {
+    for (const name of fs.readdirSync(docsDir).filter((f) => f.endsWith('.md'))) {
+      docFiles.push(path.join('docs', name))
+    }
+  }
+  for (const doc of docFiles) {
     const txt = fs.readFileSync(path.join(root, doc), 'utf8')
     const mentioned = [...new Set(
       [...txt.matchAll(/\/dsh-voice-typing([a-zA-Z0-9\/\-]*)/g)].map((m) => m[1]),

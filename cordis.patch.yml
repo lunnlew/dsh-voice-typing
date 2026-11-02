@@ -16,8 +16,12 @@
 #   POST /dsh-voice-typing/config       保存配置
 #   GET  /dsh-voice-typing/models       模型档位清单与本地状态
 #   POST /dsh-voice-typing/model        下载/准备指定档位
+#   POST /dsh-voice-typing/voice-prompt 识别文本 → 指定会话（客户端直发失败时的回退注入）
+#   POST /dsh-voice-typing/ui-action-result  UI 动作执行回执（渲染器 → 宿主 voice_ui 工具）
+#   POST /dsh-voice-typing/hotkey       系统级全局热键回调（helper 进程专用，token 鉴权）
 #   GET  /dsh-voice-typing/stream       SSE：turn-begin / turn-end / sentence / assistant-busy /
-#                                          model-progress / model-ready / model-error
+#                                          model-progress / model-ready / model-error /
+#                                          ui-action / global-hotkey
 #
 # 浏览器侧由 package.json 的 dsh.client 声明 + exports["./client"] 自动发现，
 # 在输入框右侧注册麦克风按钮（点一下切换语音模式，不是按住说话）。

@@ -99,6 +99,15 @@ function render(overrides = {}) {
     shortcut: 'Alt+V',
     idleReleaseMinutes: 10,
     preloadModels: true,
+    // 全局语音 / AI 界面操控（v1）：与宿主 DEFAULTS 同键名同默认值。
+    globalVoice: false,
+    globalShortcut: 'Ctrl+Alt+V',
+    voicePromptMode: 'queue',
+    uiControl: false,
+    uiConfirm: true,
+    globalHotkeyHelper: false,
+    // v3：唤醒词（默认「小D」；空串 = 关闭）。
+    wakeWord: '小D',
     ...overrides,
   }
   // 传 t 透传 key，这样断言可以针对稳定的 key 而不是中文文案
@@ -282,9 +291,32 @@ console.log('\n[6] 分组结构')
     && has('models', 'envCheck') && groups.models.includes('modelGroupAsr'))
   check('模型组不再包含「当前合成方式」', !groups.models.includes('ttsCurrent'))
   check('高级组含诊断/调试说明', has('advanced', 'advancedDiagnostics') && has('advanced', 'advancedDebug'))
-  check('高级组没有可配置控件',
-    !groups.advanced.includes('<input') && !groups.advanced.includes('<select')
-    && !groups.advanced.includes('<textarea') && !groups.advanced.includes('<button'))
+  // 全局语音（v1）落在交互组；AI 界面操控 / 确认 / 系统热键 helper 落在高级组，
+  // 高级组不再是纯说明区（但仍默认收起）。
+  check('交互组含全局语音三项（浮层/快捷键/注入方式）',
+    has('interaction', 'globalVoice') && has('interaction', 'globalShortcut')
+    && has('interaction', 'voicePromptMode'))
+  // v3：唤醒词输入也在交互组（全局浮层待机用；输入框麦克风不受影响）。
+  check('交互组含唤醒词输入', has('interaction', 'wakeWord'))
+  check('高级组含 AI 界面操控/确认/系统热键 helper',
+    has('advanced', 'uiControl') && has('advanced', 'uiConfirm')
+    && has('advanced', 'globalHotkeyHelper'))
+  check('高级组的三个新开关是真实可配置控件（checkbox）',
+    (groups.advanced.match(/<input/g) || []).length === 3,
+    `实际 ${(groups.advanced.match(/<input/g) || []).length} 个 input`)
+  // task-24：高级组底部还有只读「系统级热键状态」行（不是配置项）。
+  check('高级组含只读热键状态行（标题/刷新按钮）',
+    groups.advanced.includes('>hotkeyStatusTitle<')
+    && groups.advanced.includes('>hotkeyStatusRefresh<'))
+  check('状态行不引入新的可配置控件（无 select/textarea）',
+    !groups.advanced.includes('<select') && !groups.advanced.includes('<textarea'))
+  {
+    // helper 开、浮层关：即使还没拉到 diagnostics，也要提示需要开浮层。
+    const needsOverlay = render({ globalHotkeyHelper: true, globalVoice: false })
+    const start = needsOverlay.indexOf('>secAdvanced<')
+    check('helper 开启但浮层关闭 → 显示需开浮层提示',
+      start >= 0 && needsOverlay.slice(start).includes('hotkeyStatusNeedsOverlay'))
+  }
 
   // 6 组都用原生 details 折叠；只有高级组默认收起
   const detailsTags = html.match(/<details[^>]*>/g) || []

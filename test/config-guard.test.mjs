@@ -146,7 +146,7 @@ console.log('\n== 2. POST /config 合法 patch：归一化 + 落盘 + GET 回读
     words: ['热词', { correct: '正确', replace: '错误' }],
   })
   check('合法 patch → 200', good.status === 200 && good.body?.ok === true, JSON.stringify(good.body))
-  check('响应里返回完整配置（28 键）', Object.keys(good.body?.config ?? {}).length === 28,
+  check('响应里返回完整配置（35 键）', Object.keys(good.body?.config ?? {}).length === 35,
     String(Object.keys(good.body?.config ?? {}).length))
   check('响应里的引擎已归一化', good.body?.config?.ttsEngine === 'sovits', JSON.stringify(good.body?.config?.ttsEngine))
   check('响应里的数字已强转', good.body?.config?.readAloudLag === 15 && good.body?.config?.silenceMs === 1500)
@@ -162,7 +162,62 @@ console.log('\n== 2. POST /config 合法 patch：归一化 + 落盘 + GET 回读
   check('GET /config 与 POST 后的生效配置一致', get.body?.ttsEngine === 'sovits' && get.body?.readAloudLag === 15)
   check('GET /config 不含 warnings/stats（诊断不混进配置）',
     !('configWarnings' in (get.body ?? {})) && !('stats' in (get.body ?? {})), JSON.stringify(Object.keys(get.body ?? {})))
-  check('GET /config 返回完整键（与 schema 一致）', Object.keys(get.body ?? {}).length === 28)
+  check('GET /config 返回完整键（与 schema 一致）', Object.keys(get.body ?? {}).length === 35)
+}
+
+console.log('\n== 2b. 全局语音 / AI 界面操控的新键：默认值与保存回读 ==')
+{
+  const host = makeHost()
+  const get = await getConfig(host)
+  check('新键默认值安全（浮层/操控/helper 关，确认开，队列注入）',
+    get.body?.globalVoice === false && get.body?.globalShortcut === 'Ctrl+Alt+V'
+    && get.body?.voicePromptMode === 'queue' && get.body?.uiControl === false
+    && get.body?.uiConfirm === true && get.body?.globalHotkeyHelper === false,
+    JSON.stringify({
+      globalVoice: get.body?.globalVoice,
+      globalShortcut: get.body?.globalShortcut,
+      voicePromptMode: get.body?.voicePromptMode,
+      uiControl: get.body?.uiControl,
+      uiConfirm: get.body?.uiConfirm,
+      globalHotkeyHelper: get.body?.globalHotkeyHelper,
+    }))
+  // v3 第 35 键：默认开启唤醒词（空串才表示关闭）。
+  check('wakeWord 默认「小D」', get.body?.wakeWord === '小D', JSON.stringify(get.body?.wakeWord))
+
+  const saved = await postConfig(host, {
+    globalVoice: true,
+    globalShortcut: '  Ctrl+Shift+Space  ',
+    voicePromptMode: 'STEER',
+    uiControl: true,
+    uiConfirm: false,
+    globalHotkeyHelper: true,
+    wakeWord: '  小助手  ',
+  })
+  check('新键合法 patch → 200', saved.status === 200 && saved.body?.ok === true, JSON.stringify(saved.body))
+  const after = await getConfig(host)
+  check('新键已归一化并回读',
+    after.body?.globalVoice === true
+    && after.body?.globalShortcut === 'Ctrl+Shift+Space'
+    && after.body?.voicePromptMode === 'steer'
+    && after.body?.uiControl === true
+    && after.body?.uiConfirm === false
+    && after.body?.globalHotkeyHelper === true
+    && after.body?.wakeWord === '小助手',
+    JSON.stringify({
+      globalVoice: after.body?.globalVoice,
+      globalShortcut: after.body?.globalShortcut,
+      voicePromptMode: after.body?.voicePromptMode,
+      uiControl: after.body?.uiControl,
+      uiConfirm: after.body?.uiConfirm,
+      globalHotkeyHelper: after.body?.globalHotkeyHelper,
+      wakeWord: after.body?.wakeWord,
+    }))
+  // 空串 = 关闭唤醒词，必须原样落盘/回读（不能被「空串回退默认」吃掉）。
+  const disabled = await postConfig(host, { wakeWord: '' })
+  const afterOff = await getConfig(host)
+  check('wakeWord 空串 = 关闭（落盘并按空串回读）',
+    disabled.status === 200 && afterOff.body?.wakeWord === '',
+    JSON.stringify(afterOff.body?.wakeWord))
 }
 
 console.log('\n== 3. 非法引擎（手写配置文件）→ /tts 400，不静默落 online ==')

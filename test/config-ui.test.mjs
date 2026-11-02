@@ -66,6 +66,11 @@ function render(configOverrides = {}, models = []) {
     readAloudLag: 7.5, mode: 'toggle', silenceMs: 1500, autoSendExtraMs: 1200,
     removeFillers: false, words: [], shortcut: 'Alt+V', idleReleaseMinutes: 10,
     preloadModels: true,
+    // 全局语音 / AI 界面操控（v1）：与宿主 DEFAULTS 同键名同默认值。
+    globalVoice: false, globalShortcut: 'Ctrl+Alt+V', voicePromptMode: 'queue',
+    uiControl: false, uiConfirm: true, globalHotkeyHelper: false,
+    // v3：唤醒词（默认「小D」；空串 = 关闭）。
+    wakeWord: '小D',
     ...configOverrides,
   }
   return renderToStaticMarkup(React.createElement(SettingsSection, {
@@ -91,6 +96,11 @@ console.log('A. 纯函数：默认值对齐宿主 DEFAULTS')
     ['idleReleaseMinutes', 10], ['neuralSpeaker', 0],
     ['ttsFormat', 'AUDIO_24KHZ_48KBITRATE_MONO_MP3'],
     ['sovitsTextLang', 'zh'], ['sovitsPromptLang', 'zh'],
+    // 全局语音 / AI 界面操控：UI 默认值必须与宿主一致。
+    ['globalVoice', false], ['globalShortcut', 'Ctrl+Alt+V'], ['voicePromptMode', 'queue'],
+    ['uiControl', false], ['uiConfirm', true], ['globalHotkeyHelper', false],
+    // v3 唤醒词：UI 默认值必须与宿主一致。
+    ['wakeWord', '小D'],
   ]) {
     check(`UI_DEFAULTS.${key} == ${JSON.stringify(expected)}`, T.UI_DEFAULTS[key] === expected, String(T.UI_DEFAULTS[key]))
   }
@@ -266,6 +276,34 @@ console.log('\nB. 源码形状：词表输入 / 回退提示 / 保存错误')
     /saveDisabled = !dirty \|\| !loaded \|\| !shortcutCheck\.ok/.test(CLI))
   check('设置面板卸载时复位 shortcutFieldFocused',
     /shortcutFieldFocused = false \}, \[\]\)/.test(CLI))
+
+  // task-24：跨平台热键/唤醒词/uiControl 文案刷新（设置面板与浮层共用词典）。
+  check('helper 文案改为跨平台（uiohook-napi + macOS 辅助功能）',
+    /uiohook-napi/.test(CLI) && /辅助功能/.test(CLI))
+  check('helper 标签不再写「仅 Windows」',
+    !/仅 Windows/.test(CLI) && !/Windows only/.test(CLI))
+  check('全局快捷键文案含 macOS Cmd+Option+V 别名',
+    /Cmd\+Option\+V/.test(CLI))
+  check('globalVoice 文案说明自动开麦待机 + 输入框麦克风隐藏',
+    /开启后自动打开麦克风/.test(CLI) && /输入框麦克风会隐藏/.test(CLI))
+  check('唤醒词文案说明 2 字精确 / ≥3 字容错',
+    /2 个字的唤醒词必须精确匹配/.test(CLI) && /3 个字以上允许 1 个字/.test(CLI))
+  check('uiControl 文案含 a11y 边界（密码框/外链/多窗口）',
+    /密码框禁止代填/.test(CLI) && /多窗口时只有最先响应/.test(CLI))
+}
+
+console.log('\nB2. 源码形状：系统级热键只读状态行（task-24）')
+{
+  check('状态行从 /diagnostics 读取 hotkeyHelper',
+    /BASE\}\/diagnostics/.test(CLI) && /hotkeyHelper/.test(CLI))
+  check('状态行只在挂载/保存后/手动刷新时拉取（不轮询）',
+    ([...CLI.matchAll(/void loadHotkeyStatus\(\)/g)].length >= 3)
+    && !/setInterval\([^)]*loadHotkeyStatus/.test(CLI)
+    && !/while\s*\([^)]*loadHotkeyStatus/.test(CLI))
+  check('诊断失败降级为「未知（诊断不可用）」', /hotkeyStatusUnknown/.test(CLI))
+  check('状态行是只读展示，不参与配置保存',
+    !/normalizeForSave\([^)]*hotkeyStatus/.test(CLI)
+    && !/collectSaveErrors\([^)]*hotkeyStatus/.test(CLI))
 }
 
 console.log('\nC. 布局重构：6 组分区 + 说明 + 折叠 + 并排（task-19）')
@@ -296,11 +334,40 @@ console.log('\nC. 布局重构：6 组分区 + 说明 + 折叠 + 并排（task-1
   const synthesis = sliceOf('secSynthesis', 'secModels')
   const models = sliceOf('secModels', 'secAdvanced')
   const advanced = sliceOf('secAdvanced', null)
+  const interaction = sliceOf('secInteraction', 'secText')
+  const has = (group, key) => group.includes('>' + key + '<')
   check('「当前合成方式」在合成组顶部（不再在模型组）',
     synthesis.includes('ttsCurrent') && !models.includes('ttsCurrent'))
-  check('高级组无配置控件（纯说明）',
-    !advanced.includes('<input') && !advanced.includes('<select')
-    && !advanced.includes('<textarea') && !advanced.includes('<button'))
+  // 全局语音（v1）：浮层开关/全局快捷键/注入方式属于「语音交互」；
+  // AI 界面操控与系统热键 helper 属于「高级与诊断」（不是纯说明区了）。
+  check('全局语音三项在语音交互组',
+    has(interaction, 'globalVoice') && has(interaction, 'globalShortcut')
+    && has(interaction, 'voicePromptMode'))
+  // v3：唤醒词输入框也在「语音交互」组（只对全局浮层生效）。
+  check('唤醒词输入框在语音交互组', has(interaction, 'wakeWord'), interaction.slice(0, 80))
+  check('AI 界面操控/确认/系统热键 helper 在高级与诊断组',
+    has(advanced, 'uiControl') && has(advanced, 'uiConfirm')
+    && has(advanced, 'globalHotkeyHelper'))
+  check('高级组的新开关是真实可配置控件（3 个 checkbox）',
+    (advanced.match(/<input/g) || []).length === 3,
+    `实际 ${(advanced.match(/<input/g) || []).length} 个 input`)
+  // task-24：高级组底部新增只读「系统级热键状态」行（不是配置项）。
+  check('高级组含只读热键状态行（标题/标签/平台/刷新）',
+    advanced.includes('>hotkeyStatusTitle<') && advanced.includes('hotkeyStatusLabel')
+    && advanced.includes('hotkeyStatusPlatform') && advanced.includes('>hotkeyStatusRefresh<'))
+  check('默认 helper 关闭 → 状态行显示「未开启」',
+    advanced.includes('hotkeyStatusDisabled'))
+  check('状态行不引入新的可配置控件（advanced 无 select/textarea）',
+    !advanced.includes('<select') && !advanced.includes('<textarea'))
+  {
+    const helperOnHtml = render({ globalHotkeyHelper: true })
+    const start = helperOnHtml.indexOf('>secAdvanced<')
+    const advancedOn = start >= 0 ? helperOnHtml.slice(start) : ''
+    check('helper 开启但浮层关闭 → 状态行提示需同时开启浮层',
+      advancedOn.includes('hotkeyStatusNeedsOverlay'))
+    check('helper 开启、状态未拉到 → 显示「读取中」不谎报已启用',
+      advancedOn.includes('hotkeyStatusLoading'))
+  }
   const detailsTags = html.match(/<details[^>]*>/g) || []
   check('6 组都可折叠，高级组默认收起',
     detailsTags.length === 6
