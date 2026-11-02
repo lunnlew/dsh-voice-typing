@@ -23,6 +23,12 @@ import path from 'node:path'
 // 必须在 import lib/index.js 之前指好 DSH_HOME（配置路径由它决定）。
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-voice-ui-host-'))
 process.env.DSH_HOME = tmpHome
+// 宿主测试会构造 globalVoice/globalHotkeyHelper 都打开的配置。
+// 在 Linux CI（无 DISPLAY）上，原生 uiohook 的 XRecord 会 abort 整个进程
+// （0.0.5 的 GitHub Actions 就因此 exit 134）；即使有 DISPLAY，测试也不该
+// 真的抓全局键盘。用环境变量让默认 native 加载器直接失败降级，
+// 注入 fake loader 的 native 单测不受影响。
+process.env.DSH_VOICE_TYPING_DISABLE_NATIVE_HOOK = '1'
 
 const {
   apply,

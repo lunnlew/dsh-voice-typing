@@ -504,6 +504,51 @@ console.log('\n== 7. native 加载失败可重试 & 配置闸门 ==')
   helper.dispose()
 }
 
+console.log('\n== 8. 默认 native 加载器闸门：无显示/显式禁用时不 import、不 abort ==')
+{
+  const oldDisplay = process.env.DISPLAY
+  const oldDisable = process.env.DSH_VOICE_TYPING_DISABLE_NATIVE_HOOK
+  try {
+    // Linux 无 DISPLAY：libuiohook 的 XRecord 会 abort（不可捕获），必须提前拒绝。
+    delete process.env.DISPLAY
+    delete process.env.DSH_VOICE_TYPING_DISABLE_NATIVE_HOOK
+    const headless = createHotkeyHelper({ platform: 'linux', onTrigger: () => {} })
+    headless.sync({ globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Ctrl+Alt+V' }, 0)
+    await tick()
+    const headlessState = headless.state()
+    check('Linux 无 DISPLAY → failed 且原因说明没有显示服务器',
+      headlessState.enabled === false && /DISPLAY|显示/.test(headlessState.reason), JSON.stringify(headlessState))
+    headless.dispose()
+
+    // 显式禁用：任何平台都不 import。
+    process.env.DSH_VOICE_TYPING_DISABLE_NATIVE_HOOK = '1'
+    const disabled = createHotkeyHelper({ platform: 'darwin', onTrigger: () => {} })
+    disabled.sync({ globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Ctrl+Alt+V' }, 0)
+    await tick()
+    const disabledState = disabled.state()
+    check('显式禁用 → failed 且原因说明被禁用',
+      disabledState.enabled === false && /禁用/.test(disabledState.reason), JSON.stringify(disabledState))
+    disabled.dispose()
+
+    // 注入的 fake loader 不受闸门影响：仍能走完整 native 流程。
+    const fake = makeFakeNative()
+    const injected = createHotkeyHelper({
+      platform: 'linux',
+      onTrigger: () => {},
+      loadNative: async () => ({ uIOhook: fake.uIOhook, UiohookKey: fake.UiohookKey }),
+    })
+    injected.sync({ globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Ctrl+Alt+V' }, 0)
+    await tick()
+    check('注入 fake loader 时闸门不生效（enabled=true）', injected.state().enabled === true, JSON.stringify(injected.state()))
+    injected.dispose()
+  } finally {
+    if (oldDisplay === undefined) delete process.env.DISPLAY
+    else process.env.DISPLAY = oldDisplay
+    if (oldDisable === undefined) delete process.env.DSH_VOICE_TYPING_DISABLE_NATIVE_HOOK
+    else process.env.DSH_VOICE_TYPING_DISABLE_NATIVE_HOOK = oldDisable
+  }
+}
+
 if (failures.length > 0) {
   console.log(`\n✗ ${failures.length} 条失败：`)
   for (const f of failures) console.log(`  - ${f.name}${f.detail ? ' :: ' + f.detail : ''}`)
