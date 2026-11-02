@@ -1,22 +1,24 @@
 # dsh-voice-typing 代码快照说明
 
-版本：0.0.4 　生成时间：2026-11-01 21:58（0.0.4：设置面板重排为 6 个可折叠分区）
+版本：0.0.5 　生成时间：2026-11-02 09:05（0.0.5：全局语音浮层 + AI 界面操控 + 唤醒词待机 + 跨平台系统级热键）
 
 ## 文件结构
 
 | 文件 | 职责 |
 |---|---|
-| `lib/index.js` | **宿主端**（DSH 插件的 Node 侧）：HTTP 路由、识别 worker 管理、模型预加载与空闲释放、TTS 合成、`llm/stream` 钩子（按句广播） |
-| `lib/client.js` | **浏览器端**：麦克风按钮组件、录音与 VAD、草稿管理（三段拼接）、朗读队列与播放、设置面板 |
+| `lib/index.js` | **宿主端**（DSH 插件的 Node 侧）：HTTP 路由、识别 worker 管理、模型预加载与空闲释放、TTS 合成、`llm/stream` 钩子（按句广播）；v0.0.5 起还负责全局语音注入（`/voice-prompt`）、`voice_ui` 工具与 UI 动作通道（`/ui-action-claim`、`/ui-action-result`）、`/hotkey` 与热键 helper 生命周期、诊断 |
+| `lib/client.js` | **浏览器端**（构建产物）：麦克风按钮组件、录音与 VAD、草稿管理（三段拼接）、朗读队列与播放、设置面板；v0.0.5 起还有 `shell.overlay` 全局语音浮层、唤醒词待机、UI 动作执行器（a11y 快照/点击/输入/按键 + 确认条）与系统级热键状态行 |
+| `lib/ui-action-protocol.js` | **UI 动作协议**（纯函数）：14 个动作的参数/确认/长度校验、`buildUiActionPayload`（含 `expiresAt`）、`isUiActionExpired`、结果校验；与 `src/client/pure/ui-action-protocol.js` 逐条同构 |
+| `lib/global-hotkey-helper.js` | **系统级全局热键**：Windows 走 PowerShell + `RegisterHotKey`（READY 状态机、临时脚本清理），macOS/Linux 走可选依赖 `uiohook-napi`（`uIOhook` 进程内监听）；只在 `globalVoice && globalHotkeyHelper` 时运行，失败安静降级 |
 | `lib/asr-worker.js` | 识别工作线程（SenseVoice / Whisper / Zipformer2 离线推理），避免阻塞宿主主线程；支持预加载与释放 |
 | `lib/edge-tts.js` | Edge 在线 TTS：共享连接 + 互斥锁 + 预热 |
 | `lib/local-tts.js` | 本地 TTS：调用 Windows SAPI（PowerShell）/ macOS say / espeak-ng，完全离线 |
 | `lib/neural-tts.js` | 本地神经 TTS（sherpa-onnx VITS）宿主侧封装：工作线程收发、预加载与释放、WAV 编码 |
 | `lib/sovits-tts.js` | **外部 GPT-SoVITS 引擎客户端**：按官方 `api_v2` 的 `/tts` 契约转发文本（含用户配置的参考音频/文本/语言），拿回 wav；不内置模型、不做克隆、失败不回退 |
-| `lib/config-schema.js` | **配置 schema**（纯函数）：28 个键的类型/枚举/范围/URL/词表校验；加载 `sanitizeConfig`（非法回退默认 + warnings）、保存 `validateConfigPatch`（非法 → 400 errors） |
+| `lib/config-schema.js` | **配置 schema**（纯函数）：35 个键的类型/枚举/范围/URL/词表校验（含 `wakeWord`、全局语音/UI 操控/热键相关键）；加载 `sanitizeConfig`（非法回退默认 + warnings）、保存 `validateConfigPatch`（非法 → 400 errors） |
 | `lib/tts-worker.js` | 本地神经 TTS 工作线程（VITS 推理） |
 | `lib/tts-env.js` | 合成运行环境自检（引擎可用性、平台能力） |
-| `src/client/pure/*.js` | 浏览器侧纯函数源码（门限 / 草稿 / 信封 / 朗读积压 / 定时器），由脚本内联进 `lib/client.js` |
+| `src/client/pure/*.js` | 浏览器侧纯函数源码（门限 / 草稿 / 信封 / 朗读积压 / 定时器 / 全局语音 VAD 与唤醒词匹配 / a11y 交互判定 / UI 动作协议镜像），由脚本内联进 `lib/client.js` |
 | `lib/text-rules.js` | 文本规则：词表解析与替换、语气词清理、输出规范化 |
 | `lib/turn-model.js` | 回合判定模型（`createTurnModel` 工厂）：判定新一轮、分配 turnId、句子序号、空闲清理 |
 | `lib/sse-envelope.js` | SSE 事件信封协议层：`EVENT_PROTOCOL_VERSION`、全局事件序号、`buildEventEnvelope` |
@@ -419,6 +421,50 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
    没预热时首句会明显慢一点
 4. **识别无重试机制**，网络失败时保留实时字并提示用户
 
+## v0.0.5 新增：全局语音 / AI 界面操控 / 唤醒词 / 跨平台热键
+
+### 全局语音（不依赖输入框）
+```
+浮层麦克风（shell.overlay，任意页面）
+  → getUserMedia → AudioWorklet VAD（后台不被定时器节流；失败回退 ScriptProcessor）
+  → POST /transcribe → 定稿文本
+  → ① ISession.prompt([{type:'text'}], 'queue'|'steer', undefined, requestId)
+        （认证 RPC，与会话里手打消息同路径；requestId 让重试可去重）
+  → ② 回退 POST /voice-prompt（宿主 sessionController.prompt；冷会话可恢复）
+  → ③ 再回退失败才提示，不静默丢话
+```
+
+### AI 界面操控（默认关）
+```
+模型调用 voice_ui（14 个动作：语义动作 + 通用 a11y 原语）
+  → 宿主校验（uiControl/参数/expiresAt），SSE ui-action 下发
+  → 渲染器先向 POST /ui-action-claim 认领（多窗口只有第一个窗口执行）
+  → 需要确认的动作弹确认条（可点「允许/拒绝」，也可直接说）
+  → 执行（切/建会话、命令、发消息、停生成、侧栏、插件页；
+           ui_snapshot 拍可见可交互元素 → ui_click/ui_type/ui_key）
+  → POST /ui-action-result 回执（过期一律 expired，绝不执行）
+  → /diagnostics.uiActions 审计（不含参数正文）
+```
+
+### 唤醒词待机（默认「小D」）
+- 全局语音开启后自动进入待机并常开麦；只有匹配唤醒词的内容才发送（待机时环境闲聊静默丢弃）。
+- 2 字唤醒词必须精确匹配；≥3 字允许 1 字容错；唤醒后 60 秒无语音自动回待机。
+- 留空 `wakeWord` = 关闭唤醒词（说话直接发送）。
+
+### 跨平台系统级热键（窗口未聚焦也能按）
+- Windows：插件自带 PowerShell 额外进程 + `RegisterHotKey`；脚本注册成功后打印 `READY`，宿主状态 `starting → enabled`（失败 `REGISTER_FAILED` → `failed`），退出时删除临时脚本。
+- macOS / Linux：可选依赖 `uiohook-napi` 在宿主进程内做全局键盘监听（macOS 首次需「辅助功能」授权；Wayland 受限）；缺依赖/无权限自动降级为窗口内快捷键。
+- 只在 `globalVoice && globalHotkeyHelper` 同时开启时运行；状态见设置面板「系统级热键状态」或 `/diagnostics.hotkeyHelper`。
+
+### 相关宿主接口补充
+| 接口 | 用途 |
+|---|---|
+| `POST /dsh-voice-typing/voice-prompt` | 识别文本 → 指定会话（客户端直发失败的回退；JSON-only，requestId ≤200） |
+| `POST /dsh-voice-typing/ui-action-claim` | UI 动作认领（多窗口时只有第一个窗口执行；JSON-only） |
+| `POST /dsh-voice-typing/ui-action-result` | UI 动作回执（JSON-only） |
+| `POST /dsh-voice-typing/hotkey` | Windows helper 的系统热键回调（token 鉴权；JSON-only） |
+| SSE `ui-action` / `global-hotkey` | UI 动作下发 / 系统热键切换事件（与既有事件同一信封） |
+
 ## 调试入口
 
 | 接口 | 用途 |
@@ -428,12 +474,12 @@ SenseVoice 是 CPU 密集的同步计算，放主线程会卡住整个应用 0.5
 | `GET /dsh-voice-typing/tts?text=…` | 合成测试 |
 | `GET /dsh-voice-typing/tts/warmup` | 预热连接 |
 | `GET /dsh-voice-typing/busy` | 助手是否在生成 |
-| `GET /dsh-voice-typing/stream` | SSE：sentence / turn-begin / turn-end / call-end / assistant-busy / model-* 事件 |
+| `GET /dsh-voice-typing/stream` | SSE：sentence / turn-begin / turn-end / call-end / assistant-busy / model-* / ui-action / global-hotkey 事件 |
 
 ## 回归测试
 
 ```bash
-npm test             # 42 个测试文件（不连宿主；先跑 bundle-sync + client-behavior）
+npm test             # 48 个测试文件（不连宿主；先跑 bundle-sync + client-behavior）
 npm run build:client # 把 src/client/pure/ 内联进 lib/client.js
 npm run check:client # 只校验产物是否最新（CI 用）
 npm run test:silence -- http://127.0.0.1:<端口>   # 静音与流式识别回归（需要宿主在运行）
