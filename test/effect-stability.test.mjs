@@ -22,12 +22,21 @@
  *      effect 直接判失败，不再 `continue` 悄悄放过。
  *   EventSource 的 cleanup 也改为「按所属 effect 的边界」匹配，
  *   不再用宽松的 250 行窗口。
+ *
+ * 2026-11-04 批次 6l-c：这里剩的两条**源码文本**判据（扫 `const t = typeof props`、
+ *   扫 cleanup 里的 `close(`）删掉了，改由 test/client-behavior.test.mjs 的
+ *   「SSE 不重连与卸载关闭」场景真的挂载 / 重渲染 / 卸载来判。
+ *   余下的行不动，它们不是「扫源码找写法」，而是**解析器本身**（去注释、括号配平、
+ *   依赖数组抽取）和「依赖里不许直接放 props 字段」这条结构约束 ——
+ *   后者要真跑就得让宿主传一个每次渲染都变的 props，等于把这里想防的 bug 写进源码。
+ *   裁定、代价与推翻条件见 docs/architecture-modernization.md §8.46（6l-c）。
  */
-import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { clientSource } from './helpers/client-source.mjs'
 
-const file = fileURLToPath(new URL('../lib/client.js', import.meta.url))
-const src = fs.readFileSync(file, 'utf8')
+// 读**源码**（main.js 拍平 + pure/），不读 lib/client.js 产物：
+// 这里的括号配平/依赖数组解析是按人类写法设计的，esbuild 的输出形态（引号、空白、
+// 重排）会让 sanitize 的字符串扫描错位、一个 effect 都找不到。
+const src = clientSource()
 
 let passed = 0
 let failed = 0
@@ -127,9 +136,10 @@ console.log('翻译函数 t 的引用必须稳定')
     tDefs.every((d) => d.kind === 'useCallback'),
     tDefs.filter((d) => d.kind !== 'useCallback').map((d) => d.text).join(' | '))
 }
-check('没有裸箭头函数形式的 t',
-  !/const t = typeof props/.test(src),
-  '裸箭头每次渲染都是新引用，会让依赖它的 effect 反复重跑')
+// 「不许有裸箭头形式的 t」这条**源码文本**判据（2026-11-04 批次 6l-c 删）：
+// 它真正的意思是「t 的引用变了会让 effect 反复重连」，而这件事现在由
+// test/client-behavior.test.mjs 的「SSE 不重连与卸载关闭」场景直接跑出来 ——
+// 假 React 里用新 props 重渲染 5 次，数 EventSource 的条数有没有跟着涨。
 
 // 2) 每个 useEffect 都要能解析出依赖数组；依赖里不能有「每次渲染都变」的 props 字段
 const effectCalls = []
@@ -182,14 +192,10 @@ check('每个 useEffect 都能解析出依赖数组（解析不了就失败，�
     const host = effectCalls.find((e) => e.end > at && e.start < at)
     check(`行 ${line} 的 EventSource 在 effect 里创建`, Boolean(host),
       '在 effect 外创建 = 没有 cleanup 机会，组件卸载后连接还在')
-    if (!host) continue
-    const body = src.slice(host.start, host.end + 1)
-    check(`行 ${line} 的 EventSource 在所属 effect 的 cleanup 里被 close()`,
-      // 允许两种写法：`return () => source.close()`，以及带清理逻辑的
-      // `return () => { …; source?.close?.() }`（重连实现需要先置 disposed、
-      // 清重连定时器，再关连接，不能写成一行裸 close）。
-      /return \(\) =>[\s\S]{0,500}?close\s*\??\.?\s*\(/.test(body),
-      '不关的话组件卸载后连接还在，事件会打到已卸载的组件上（要求按 effect 边界匹配，不再用 250 行窗口）')
+    // 「所属 effect 的 cleanup 里 close()」这条**源码文本**判据（2026-11-04 批次 6l-c 删）：
+    // 它靠正则认 `return () => …close(`，写法一变就误报、写成别的合法清理又漏报。
+    // 现在由 client-behavior 的同一个场景判行为：unmount() 后 env.eventSources
+    // 里每条都该 closed === true，摘掉 close() 当场变红（实测见 docs §8.46）。
   }
 }
 

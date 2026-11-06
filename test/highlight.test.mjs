@@ -3,7 +3,7 @@
  *
  * 纯函数住在 src/client/pure/highlight.js，**原生 import** 即可
  * （它们只碰字符串，不依赖浏览器 DOM）。
- * 产物 lib/client.js 由 scripts/bundle-client.mjs 从同一份源码内联生成，
+ * 产物 lib/client.js 由 scripts/build-client.mjs 从同一份源码合并生成，
  * bundle-sync.test.mjs 会校验两者同步。
  *
  * 这里覆盖「把宿主的纯文本句对齐到渲染后的 DOM 文本」这条链的

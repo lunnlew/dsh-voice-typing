@@ -23,6 +23,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { mkdir } from 'node:fs/promises'
+import { hostModule } from './helpers/host-source.mjs'
 
 // 配置读写都指向临时目录：别碰用户的 ~/.dsh。
 const tmpHome = path.join(os.tmpdir(), 'dsh-voice-typing-event-contract')
@@ -35,8 +36,12 @@ const {
   downloadPercent,
   EVENT_PROTOCOL_VERSION,
 } = await import('../lib/index.js')
-const HOST_SRC = fs.readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
-const ENV_SRC = fs.readFileSync(new URL('../lib/sse-envelope.js', import.meta.url), 'utf8')
+// 形状断言全部从这个文件搬走了（批次 6i-b，docs §8.42）：
+// 上面那份 `await import('../lib/index.js')` 拿到的是真产物，本文件的判据现在都跑在
+// 真广播出来的帧、真路由的响应上。原来还留着三条读手写源码的正则，去向写在下面两处注释里。
+// ENV_SRC 随着「协议层抽到独立模块」那条形状断言一起删了：
+// 顶层 `await import('../lib/index.js')` 能取到 buildEventEnvelope / EVENT_PROTOCOL_VERSION，
+// 已经比「那个文件里还有这两行 export」更硬；剩下的判据都在真帧上。
 
 let passed = 0
 let failed = 0
@@ -351,8 +356,8 @@ console.log('\n跨端一致：客户端的 parseEnvelope 能原样解析宿主�
 // ---------------------------------------------------------------------------
 console.log('\nsentence 契约：真实调度器产出 → 真实信封 → 客户端解析')
 {
-  const { createReadAloudScheduler } = await import('../lib/read-aloud-scheduler.js')
-  const { createTurnModel } = await import('../lib/turn-model.js')
+  const { createReadAloudScheduler } = await hostModule('read-aloud-scheduler')
+  const { createTurnModel } = await hostModule('turn-model')
   const { parseEnvelope } = await import('../src/client/pure/envelope.js')
 
   // 真实生产实现：句子序号由 turnModel.nextSentenceIndex 分配（不是测试自己造的 stub），
@@ -423,16 +428,16 @@ console.log('\nsentence 契约：真实调度器产出 → 真实信封 → 客�
   scheduler.dispose()
 }
 
-// 客户端侧的形状守卫（event-contract 独有的一条）：
-// 所有 SSE 消费都走 parseEnvelope，除解析器内部外没有裸 JSON.parse(event.data)
-// —— 裸解析在信封协议下拿不到业务字段。
-{
-  const CLI_SRC = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  const bare = (CLI_SRC.match(/JSON\.parse\(event\.data\)/g) || []).length
-  check('客户端：除 parseEnvelope 内部外没有裸的 JSON.parse(event.data)',
-    bare <= 1 && /parseEnvelope\(event\)/.test(CLI_SRC),
-    `裸解析 ${bare} 处`)
-}
+// 原来这里是「客户端除 parseEnvelope 内部外没有裸的 JSON.parse(event.data)」的源码计数。
+// **删**（批次 6i-b，docs §8.42），理由分两半：
+//   · 它能守住的「消费点真的在用信封」这一半，现在由 `test/client-behavior.test.mjs`
+//     的场景「信封消费」真跑：别的会话的句子既不念也不回执、缺 sessionId 的全局事件照样生效、
+//     五种事件的 data 喂坏之后 SSE 还能继续念 —— 那三条判的是这件事的实际后果。
+//   · 它的另一半「不许出现裸解析」在这里**没有行为面**：客户端每个 SSE handler 外面都包着
+//     `try { … } catch { /* 忽略 */ }`，裸解析抛出来的异常会被那层 catch 当场吞掉，
+//     和 parseEnvelope 返回 null 走的是同一条出口，跑不出差别。
+//     推翻条件：哪天把某个 handler 外面那层 catch 去掉（让坏帧成为可观察的故障），
+//     「有没有裸解析」就又能被跑出来了 —— 那时应该在 client-behavior 里加判据，而不是回到这条正则。
 
 // 客户端解析器的健壮性（event-contract 迁移）：坏输入不能抛。
 {
@@ -510,34 +515,25 @@ console.log('\n路由：死链清理')
   const busy = JSON.parse(busyRes.body)
   check('GET /busy 的响应与 assistant-busy 事件同源',
     busy.busy === false && 'sessionId' in busy && 'since' in busy, busyRes.body)
-  check('GET /latest-message 保留（这轮客户端还要用）',
-    host.routes.has('/dsh-voice-typing/latest-message'))
-  check('GET /latest-message 在源码里标注了「未使用」',
-    /保留但未使用|保留但客户端已不用/.test(HOST_SRC))
+  check('GET /latest-message 已删除（批次 17：客户端不调的死链，约 100 行 + 一份轮次键双实现）',
+    !host.routes.has('/dsh-voice-typing/latest-message'))
+  // 「源码里标注了未使用」删掉了：注释是不是这么写的，不是能被测出来的行为（§8.34 批次 0）。
 }
 
-console.log('\n源码：信封与死事件的清理')
-check('broadcast 里统一套信封',
-  /const broadcast = \(event, payload\) => \{[\s\S]{0,240}?buildEventEnvelope\(payload\)/.test(HOST_SRC))
-check('SSE 写出去的是整个信封',
-  /data: \$\{JSON\.stringify\(envelope\)\}/.test(HOST_SRC))
-check('模块级 seq 计数器存在（在独立协议模块里）', /let eventSeq = 0/.test(ENV_SRC))
-check('协议层抽到独立模块 lib/sse-envelope.js',
-  /export const EVENT_PROTOCOL_VERSION = 3/.test(ENV_SRC) && /export function buildEventEnvelope/.test(ENV_SRC),
-  '信封协议应隔离出来，避免改协议误碰宿主路由/朗读')
-check('不再广播 session 事件', !/broadcast\('session'/.test(HOST_SRC))
-check('不再广播旧的 busy 事件', !/emitBroadcast\?\.\('busy'/.test(HOST_SRC))
-check('广播 assistant-busy 事件', /emitBroadcast\?\.\('assistant-busy'/.test(HOST_SRC))
-check('assistant-busy 的载荷字段是 busy', /'assistant-busy', \{ busy: [^}]*sessionId/.test(HOST_SRC))
-check('模型事件带 kind',
-  /broadcast\('model-progress', \{[\s\S]{0,200}?kind/.test(HOST_SRC) &&
-  /broadcast\('model-ready', \{ id: model\.id, kind \}\)/.test(HOST_SRC) &&
-  /broadcast\('model-error', \{[\s\S]{0,120}?kind/.test(HOST_SRC))
-check('model-progress 的 percent 由宿主算',
-  /percent: downloadPercent\(received, total\)/.test(HOST_SRC))
-check('没有 activeSession 变量了',
-  !/let\s+activeSession\b/.test(HOST_SRC) && !/activeSession\s*=/.test(HOST_SRC))
-check('没有 /dsh-voice-typing/session 路由了', !/dsh-voice-typing\/session/.test(HOST_SRC))
+console.log('\n信封与死事件的清理（本节现在一条源码正则都不留）')
+// 这一节原来 11 条，先删了 8 条 —— 它们盯的东西这个文件已经在前面的真执行场景里查过了：
+//   · 每帧都带 v/seq/ts/sessionId → 等价于「broadcast 统一套信封」+「SSE 写整个信封」+「模块级 seq」；
+//   · assistant-busy 的置位/复位/载荷（含 sessionId）→ 等价于那两条 emitBroadcast 正则；
+//   · 「不发 session / 不发旧 busy 事件」+「路由表里没有 /session」→ 等价于三条死符号正则。
+// 当时留下的两条（模型事件带 kind、percent 由宿主算）写着「等一个下载场景」（§8.34 批次 1），
+// 那个场景一直在 `test/model-state.test.mjs` 里跑（S2 下载中 / S3 下完 / S4 失败），
+// 批次 6i-b 把缺的那两格补齐：
+//   · 「S2 model-progress 每一帧都带 kind」
+//   · 「S4 model-error 带的是这条档位与 asr 类别」（S3 的 model-ready 早就带 kind 了）
+//   · percent 那一格本来就在：S2 判的是**收下来的帧**里的 percent 是整数、0..100、单调不减、最后到 100，
+//     而「percent 由宿主算」这个契约的另一半（算法本身）由本文件那 8 条 `downloadPercent` 纯函数判据守。
+// 于是这两条正则删掉：宿主源码里写着 `kind` 只能证明「有人写过这个词」，
+// 收到帧里带不带 kind、percent 是不是宿主算出来的，上面那三条才是能看的。
 
 console.log(`\n通过 ${passed}，失败 ${failed}`)
 process.exitCode = failed ? 1 : 0

@@ -1,6 +1,7 @@
 # dsh-voice-typing 的 bundle patch —— 插入语音输入插件行。
 #
-# 宿主侧（lib/index.js）加载 dsh-voice-typing，路由清单：
+# 宿主侧（lib/index.js）加载 dsh-voice-typing，路由清单（全，一条不多一条不少：
+# 这份清单与真装出来的注册表由 test/route-contract.test.mjs 双向核对，漏一条或写歪都红）：
 #   POST /dsh-voice-typing/transcribe    录音 → 文字
 #   POST /dsh-voice-typing/asr-stream?sessionId=…   边喂边出字（实时文字）
 #   POST /dsh-voice-typing/asr-stream/reset?sessionId=…  结束流式并丢弃状态
@@ -8,18 +9,21 @@
 #   GET  /dsh-voice-typing/voices?engine=…             音色列表
 #   GET  /dsh-voice-typing/tts/env       合成运行环境自检
 #   GET  /dsh-voice-typing/tts/warmup    预热在线 TTS 连接（本地引擎无连接概念）
-#   GET  /dsh-voice-typing/latest-message?sessionId=…   本轮 assistant 回复全文（保留备用，客户端未调用）
+#   GET  /dsh-voice-typing/asr-ready     识别模型是否已下载 + 已加载（客户端开麦前先问）
+#   POST /dsh-voice-typing/asr-warmup    确保识别模型真的加载好（没就绪就等到就绪）
 #   GET  /dsh-voice-typing/busy          助手是否正在生成（降级用，首选是 assistant-busy 事件）
 #   GET  /dsh-voice-typing/diagnostics   诊断数据（统计、忙状态、下载进度）
 #   POST /dsh-voice-typing/voice-session 客户端心跳上报（诊断用）
+#   POST /dsh-voice-typing/reading-ack   客户端开始播某一句时回它（朗读按播放进度补发下一句）
+#   POST /dsh-voice-typing/voice-prompt 识别文本 → 指定会话（客户端直发失败时的回退注入）
+#   POST /dsh-voice-typing/ui-action-result  UI 动作执行回执（渲染器 → 宿主 voice_ui 工具）
+#   POST /dsh-voice-typing/ui-action-claim   UI 动作执行认领（多窗口时只有第一个窗口执行）
+#   POST /dsh-voice-typing/hotkey       系统级全局热键回调（helper 进程专用，token 鉴权）
 #   GET  /dsh-voice-typing/config       当前生效配置
 #   POST /dsh-voice-typing/config       保存配置
 #   GET  /dsh-voice-typing/models       模型档位清单与本地状态
 #   POST /dsh-voice-typing/model        下载/准备指定档位
-#   POST /dsh-voice-typing/voice-prompt 识别文本 → 指定会话（客户端直发失败时的回退注入）
-#   POST /dsh-voice-typing/ui-action-result  UI 动作执行回执（渲染器 → 宿主 voice_ui 工具）
-#   POST /dsh-voice-typing/hotkey       系统级全局热键回调（helper 进程专用，token 鉴权）
-#   GET  /dsh-voice-typing/stream       SSE：turn-begin / turn-end / sentence / assistant-busy /
+#   GET  /dsh-voice-typing/stream       SSE：turn-begin / turn-end / call-end / sentence / assistant-busy /
 #                                          model-progress / model-ready / model-error /
 #                                          ui-action / global-hotkey
 #

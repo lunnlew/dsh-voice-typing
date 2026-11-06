@@ -23,19 +23,20 @@
 import os from 'node:os'
 import path from 'node:path'
 import { mkdir } from 'node:fs/promises'
+import { hostModule } from './helpers/host-source.mjs'
 
 const tmpHome = path.join(os.tmpdir(), `dsh-vt-read-aloud-chain-${process.pid}`)
 await mkdir(tmpHome, { recursive: true })
 process.env.DSH_HOME = tmpHome
 
 const { apply } = await import('../lib/index.js')
-const { splitParagraphs } = await import('../lib/paragraph.js')
-const { stripForSpeech, splitSentenceParts } = await import('../lib/speech-clean.js')
-const { createFenceFilter } = await import('../lib/fence-filter.js')
-const { EMIT_WINDOW_MS, MAX_SENTENCE_CHARS, splitLongText, packWindowSentences } = await import(
-  '../lib/read-aloud-policy.js'
+const { splitParagraphs } = await hostModule('paragraph')
+const { stripForSpeech, splitSentenceParts } = await hostModule('speech-clean')
+const { createFenceFilter } = await hostModule('fence-filter')
+const { EMIT_WINDOW_MS, MAX_SENTENCE_CHARS, splitLongText, packWindowSentences } = await hostModule(
+  'read-aloud-policy'
 )
-const { READ_ALOUD_LEAD } = await import('../lib/read-aloud-scheduler.js')
+const { READ_ALOUD_LEAD } = await hostModule('read-aloud-scheduler')
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 

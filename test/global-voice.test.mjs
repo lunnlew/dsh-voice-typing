@@ -10,8 +10,6 @@
  *
  * 用法：node test/global-voice.test.mjs
  */
-import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import {
   VOICE_TEXT_MAX,
   GLOBAL_VAD_PROCESSOR,
@@ -27,10 +25,13 @@ import {
   pickSessionId,
   findMainViewSessionId,
   matchWakeWord,
+  resolveActiveUtterance,
+  inferWakeLanguage,
+  resolveWakeLanguage,
+  resolveAsrLanguage,
   effectiveShortcut,
 } from '../src/client/pure/global-voice.js'
 
-const root = fileURLToPath(new URL('..', import.meta.url))
 
 let passed = 0
 let failed = 0
@@ -40,17 +41,9 @@ function check(name, ok, detail = '') {
 }
 
 /* ================================================================ */
-console.log('纯函数约束（Node 可原生 import，不碰浏览器 API）')
-{
-  const raw = fs.readFileSync(root + '/src/client/pure/global-voice.js', 'utf8')
-  const code = raw
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^\s*\/\/.*$/gm, '')
-  check('不依赖 window/document/navigator',
-    !/\bwindow\.|\bdocument\.|navigator\./.test(code),
-    '纯函数文件要能在 Node 里 import，浏览器 API 由调用方传入')
-  check('不依赖 React', !/\bReact\b/.test(code))
-}
+// 「global-voice.js 不碰浏览器全局 / 不依赖 React」这两条形状断言删了（§8.34 批次 0）：
+// 同一判据在 test/bundle-sync.test.mjs 里对构建合并的**每个**文件都跑，
+// 名单来自 esbuild 的 import 图，硬编码单个路径的那种写法会被它漏掉而不是被它兜住。
 
 /* ================================================================ */
 console.log('\nVAD 分段状态机')
@@ -272,6 +265,50 @@ console.log('\nAudioWorklet 源码（同一份状态机内联）')
   processor2.process([[loud()]])
   const forced = messages.find((m) => m.type === 'segment')
   check('连续说话达到 maxFrames 强制切段', Boolean(forced) && forced.forced === true)
+
+  // 预录环（docs §8.33）：「开口」判定天然滞后（声音要连续几帧压过自适应门限才报 start），
+  // 轻声的第一个字整段落在这个滞后窗口里。装机实测：合成「小鱼，今天下午三点开会」喂假麦克风，
+  // 真实起点 1.30s、start 判定 1.83s，滞后约 530ms —— 预录环上界当时写的是 startFrames
+  // （Worklet 每帧 128 采样 → 48kHz 下只有 8ms），于是每一段的第一句都是「今天下午」，
+  // 唤醒词从来没进过段，浮层每条都报 wake-miss。
+  // 这里断言的是**段的字节构成**，不是源码写法：环留几帧、段里就有几个「帧 × 128」。
+  messages.length = 0
+  const preRoll = { ...DEFAULT_VAD_OPTIONS, startFrames: 1, silenceFrames: 2, maxFrames: 100000, preRollFrames: 5 }
+  const processor3 = new ProcessorClass({ processorOptions: preRoll })
+  for (let i = 0; i < 40; i++) processor3.process([[quiet()]])
+  processor3.process([[loud()]])
+  processor3.process([[quiet()]])
+  processor3.process([[quiet()]])
+  const preSegment = messages.find((m) => m.type === 'segment')
+  check('预录环把开口前的音频带进段里，且只留 preRollFrames 帧（空闲 40 帧不会全缓存）',
+    preSegment?.samples?.length === 128 * (5 + 1 + 2), String(preSegment?.samples?.length))
+
+  messages.length = 0
+  const processor4 = new ProcessorClass({
+    processorOptions: { ...DEFAULT_VAD_OPTIONS, startFrames: 1, silenceFrames: 2, maxFrames: 100000 },
+  })
+  for (let i = 0; i < 400; i++) processor4.process([[quiet()]])
+  processor4.process([[loud()]])
+  processor4.process([[quiet()]])
+  processor4.process([[quiet()]])
+  const defSegment = messages.find((m) => m.type === 'segment')
+  check('默认预录 = 600ms（48k/128 下 225 帧），不再是 startFrames 那 3 帧 = 8ms',
+    defSegment?.samples?.length === 128 * (DEFAULT_VAD_OPTIONS.preRollFrames + 1 + 2),
+    String(defSegment?.samples?.length))
+  check('preRollFrames 与 preRollMs 是同一个数换算出来的（别一处 600 一处 800）',
+    DEFAULT_VAD_OPTIONS.preRollFrames === vadFramesForMs(DEFAULT_VAD_OPTIONS.preRollMs, 48000, 128),
+    JSON.stringify({ ms: DEFAULT_VAD_OPTIONS.preRollMs, frames: DEFAULT_VAD_OPTIONS.preRollFrames }))
+  check('没传 preRollFrames 时源码里也有兜底（老调用方不会因为 undefined 把环关掉）',
+    (() => {
+      messages.length = 0
+      const bare = new ProcessorClass({ processorOptions: { startFrames: 1, silenceFrames: 2, maxFrames: 100000 } })
+      for (let i = 0; i < 400; i++) bare.process([[quiet()]])
+      bare.process([[loud()]])
+      bare.process([[quiet()]])
+      bare.process([[quiet()]])
+      const s = messages.find((m) => m.type === 'segment')
+      return Boolean(s) && s.samples.length > 128 * 4
+    })())
 }
 
 /* ================================================================ */
@@ -487,13 +524,49 @@ console.log('\nv3 唤醒词匹配 matchWakeWord')
   deny('小区门口', '小D')
   deny('小张来了', '小D')
   deny('小打开设置', '小D')
-  deny('小滴打开设置', '小D') // 两字唤醒词：错一个字也不能唤醒
+  // 两字唤醒词仍不启用「任意错一字」，但**已知同音字/字母同音**会归一后再精确匹配：
+  // ASR 常把「小D」写成「小迪/小弟/小地/小滴/小底/小低/小第/小帝/晓D/小Ｄ」。
+  allow('小迪', '小D', '', 'head')
+  allow('小弟打开设置', '小D', '打开设置', 'head')
+  deny('小地', '小D') // 地/的/得/德 词频太高，会造成「小地方」误唤醒，不归一
+  allow('小滴打开设置', '小D', '打开设置', 'head')
+  allow('小底', '小D', '', 'head')
+  allow('小低', '小D', '', 'head')
+  allow('小第', '小D', '', 'head')
+  allow('小帝', '小D', '', 'head')
+  allow('晓D打开设置', '小D', '打开设置', 'head') // 首字同音（小→晓）
+  allow('小渔', '小鱼', '', 'head') // 2 字中文唤醒词的已知同音字（渔→鱼）
+  allow('小渔，打开插件', '小鱼', '打开插件', 'head')
+  deny('小余', '小鱼') // 不是同音表里的字：不误唤醒
+  allow('小Ｄ打开设置', '小D', '打开设置', 'head') // 全角字母
+  allow('小 D 打开设置', '小D', '打开设置', 'head') // 字母前有空格
+  allow('你好小D', '小D', '', 'head') // 常见喊话前缀
+  allow('你好小弟，打开插件', '小D', '打开插件', 'head')
+  allow('嗨 小D，打开插件', '小D', '打开插件', 'head')
   // 3 字唤醒词仍保留 1 字容错
   allow('大助手打开设置', '小助手', '打开设置', 'fuzzy') // 错第一个字（1 个字距离）
   allow('助手打开设置', '小助手', '打开设置', 'fuzzy') // 少第一个字
-  allow('小助首打开设置', '小助手', '打开设置', 'fuzzy') // 错最后一个字，命令首字不丢
+  allow('小助首打开设置', '小助手', '打开设置', 'head') // 「首」是同音字，归一到「手」后就是精确匹配
   allow('小小助手打开设置', '小助手', '打开设置', 'fuzzy') // 多一个字
-  deny('大助首打开设置', '小助手') // 错两个字
+  allow('大助首打开设置', '小助手', '打开设置', 'fuzzy') // 首→手归一后只剩 1 个错字
+  deny('大助收打开设置', '小助手') // 真正错两个字（收不是「手」的同音字）
+
+  // 5b) 别名唤醒词：用 | 或中文逗号/顿号分隔多个说法
+  allow('小D', '小D|小迪', '', 'head')
+  allow('小迪打开设置', '小D|小迪', '打开设置', 'head')
+  allow('你好小D', '小D|你好小D', '', 'head')
+  allow('你好小D打开插件', '小D|你好小D', '打开插件', 'head')
+  allow('小D', ' 小D | 小迪 ', '', 'head')
+  allow('小迪', '小D，小迪', '', 'head')
+  deny('小助手', '小D|小迪')
+  deny('', '小D|小迪')
+
+  // 5c) 唤醒词本身以语气词开头时也要能命中（评审 P1：不能先剥语气词再比对）
+  allow('你好小鱼', '你好小鱼', '', 'head')
+  allow('你好小鱼，打开插件', '你好小鱼', '打开插件', 'head')
+  allow('你好小D', '你好小D', '', 'head')
+  allow('你好小D，打开设置', '你好小D', '打开设置', 'head')
+  deny('小鱼', '你好小鱼')
 
   // 6) 不允许句中匹配（只认开头）
   deny('请打开小D', '小D')
@@ -514,6 +587,51 @@ console.log('\nv3 唤醒词匹配 matchWakeWord')
   check('超长唤醒词不抛错', matchWakeWord('你好', '唤'.repeat(200)).matched === false)
   check('唤醒词比文本长不匹配', matchWakeWord('小', '小助手').matched === false)
   check('剩余文本去掉前导标点/空白', matchWakeWord('小D，。 打开设置', '小D').rest === '打开设置')
+
+  // 10) 已唤醒态：唤醒词本身绝不进会话消息
+  check('活跃态只喊唤醒词 → 不发送', resolveActiveUtterance('小鱼', '小鱼').action === 'wake-only')
+  check('活跃态只喊同音唤醒词 → 不发送', resolveActiveUtterance('小渔', '小鱼').action === 'wake-only')
+  check('活跃态唤醒词+命令 → 只发命令',
+    JSON.stringify(resolveActiveUtterance('小鱼，打开插件', '小鱼')) === JSON.stringify({ action: 'command', text: '打开插件' }))
+  check('活跃态普通对话 → 原样发送',
+    JSON.stringify(resolveActiveUtterance('今天天气怎么样', '小鱼')) === JSON.stringify({ action: 'command', text: '今天天气怎么样' }))
+  check('活跃态句中唤醒词不算 → 原样发送',
+    JSON.stringify(resolveActiveUtterance('请打开小鱼', '小鱼')) === JSON.stringify({ action: 'command', text: '请打开小鱼' }))
+  check('唤醒词关闭（空串）→ 全部原样发送',
+    JSON.stringify(resolveActiveUtterance('小鱼', '')) === JSON.stringify({ action: 'command', text: '小鱼' }))
+}
+
+/* ================================================================ */
+/* ================================================================ */
+console.log('\n待机识别语言：inferWakeLanguage / resolveWakeLanguage / resolveAsrLanguage')
+{
+  check('中文唤醒词 → zh', inferWakeLanguage('小D') === 'zh')
+  check('英文唤醒词 → en', inferWakeLanguage('hey jarvis') === 'en')
+  check('日文唤醒词 → ja', inferWakeLanguage('こんにちは') === 'ja')
+  check('韩文唤醒词 → ko', inferWakeLanguage('안녕') === 'ko')
+  check('空唤醒词 → auto', inferWakeLanguage('') === 'auto')
+  check('别名取中文优先', inferWakeLanguage('小D|hey d') === 'zh')
+
+  check('显式配置优先于系统语言', resolveWakeLanguage('en', '小D', 'zh-CN') === 'en')
+  check('配置 yue 也保留', resolveWakeLanguage('yue', '小D', 'en-US') === 'yue')
+  check('auto + 系统中文 → zh', resolveWakeLanguage('auto', '小D', 'zh-CN') === 'zh')
+  check('auto + 系统英文 → en', resolveWakeLanguage('auto', 'hey d', 'en-US') === 'en')
+  check('唤醒词脚本优先于系统语言（中文唤醒词 + en 系统 → zh）',
+    resolveWakeLanguage('auto', '小鱼', 'en-US') === 'zh')
+  check('唤醒词脚本优先于系统语言（英文唤醒词 + ja 系统 → en）',
+    resolveWakeLanguage('auto', 'hey d', 'ja-JP') === 'en')
+  check('无法判断脚本时才用系统语言', resolveWakeLanguage('auto', '', 'ja-JP') === 'ja')
+  check('auto + 未知系统语言 → 按唤醒词推断',
+    resolveWakeLanguage('auto', '小D', 'xx-YY') === 'zh'
+    && resolveWakeLanguage('auto', 'hey d', 'xx-YY') === 'en')
+  check('auto + 未知系统语言 + 空唤醒词 → auto',
+    resolveWakeLanguage('auto', '', 'xx-YY') === 'auto')
+
+  check('对话识别：显式配置优先', resolveAsrLanguage('zh', 'en-US') === 'zh')
+  check('对话识别：auto + 系统中文 → zh', resolveAsrLanguage('auto', 'zh-CN') === 'zh')
+  check('对话识别：auto + 系统英文 → en', resolveAsrLanguage('auto', 'en-US') === 'en')
+  check('对话识别：未知系统语言 → auto', resolveAsrLanguage('auto', 'xx-YY') === 'auto')
+  check('对话识别：无系统语言 → auto', resolveAsrLanguage('auto', undefined) === 'auto')
 }
 
 /* ================================================================ */

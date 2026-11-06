@@ -16,6 +16,16 @@
  * （见 src/client/main.js 的 executeUiAction）。
  */
 
+// 修饰键别名 → 规范名：来自 src/shared/key-modifiers.js（4.3b 单源）。
+// 这条链路是「主动派发按键给 DOM」，快捷键匹配是「被动比较用户按下的键」，
+// 两边问的是同一个问题 ——「Control 该不该按下 ctrlKey」。以前各写一张表，
+// 于是同一句 `Control+Alt+V` 在两处可以给出不同答案；差异只该留在**主键**那半
+// （这里要把键名规范成 KeyboardEvent.key 的真值，匹配层不需要）。
+// 主键那半现在也单源了（4.3d：src/shared/key-names.js），本文件只剩一条策略：
+// 「模型可以把哪些键打进当前页面」。
+import { KEY_MODIFIER_ALIASES } from '../../shared/key-modifiers.js'
+import { domKeyOf, keyNameOf } from '../../shared/key-names.js'
+
 /** 快照 ref 前缀：最终形态是 `e1`、`e2`…（由调用方传入的序号拼上前缀）。 */
 export const A11Y_REF_PREFIX = 'e'
 
@@ -36,43 +46,42 @@ const INTERACTIVE_ROLES = ['button', 'tab', 'link', 'checkbox', 'switch', 'menui
 /** 这些 input type 不算可交互（不可见、不可点，拍进快照只会让模型误点）。 */
 const HIDDEN_INPUT_TYPES = ['hidden']
 
-/** 修饰键别名 → 规范名。 */
-const MODIFIER_ALIASES = {
-  ctrl: 'ctrl',
-  control: 'ctrl',
-  alt: 'alt',
-  option: 'alt',
-  shift: 'shift',
-  meta: 'meta',
-  cmd: 'meta',
-  command: 'meta',
-  win: 'meta',
-  super: 'meta',
-}
-
 /** 具名键（大小写不敏感）→ KeyboardEvent.key 规范值。 */
-const NAMED_KEYS = {
-  enter: 'Enter',
-  escape: 'Escape',
-  esc: 'Escape',
-  tab: 'Tab',
-  space: 'Space',
-  arrowup: 'ArrowUp',
-  up: 'ArrowUp',
-  arrowdown: 'ArrowDown',
-  down: 'ArrowDown',
-  arrowleft: 'ArrowLeft',
-  left: 'ArrowLeft',
-  arrowright: 'ArrowRight',
-  right: 'ArrowRight',
-  pageup: 'PageUp',
-  pagedown: 'PageDown',
-  home: 'Home',
-  end: 'End',
-  delete: 'Delete',
-  del: 'Delete',
-  backspace: 'Backspace',
-}
+/**
+ * `ui_key` 允许派发给页面的具名键**写法**（小写）。
+ *
+ * 这是一条**策略**，不是词表：哪些写法算哪个键由 `src/shared/key-names.js` 回答，
+ * 这里只决定「模型能不能把这个键打进当前页面」。
+ *
+ * 为什么按写法判而不是按规范名判：`Return` 和 `Enter` 是同一个键（规范名都是 `Enter`），
+ * 但历史上 a11y 只认 `Enter` 这一种写法。按规范名过滤会把「多认一种别名」这件事
+ * 混进策略里 —— 策略要动的应该是名单本身，而不是被词表带着动。
+ * 4.3d 归并词表时这条名单一条没扩大、一条没缩小（20 条写法 = 原来那张 `NAMED_KEYS` 的键）。
+ *
+ * 单字母、数字、F1-F12 由 `isDispatchableKey` 按形状放行，不在这里逐条列。
+ */
+const DISPATCHABLE_KEY_SPELLINGS = [
+  'enter',
+  'escape',
+  'esc',
+  'tab',
+  'space',
+  'arrowup',
+  'up',
+  'arrowdown',
+  'down',
+  'arrowleft',
+  'left',
+  'arrowright',
+  'right',
+  'pageup',
+  'pagedown',
+  'home',
+  'end',
+  'delete',
+  'del',
+  'backspace',
+]
 
 /** 用户说这些词 = 允许（整句匹配）。 */
 const ALLOW_WORDS = ['允许', '确认', '可以', '好', '行', '同意', 'ok', 'okay', 'yes', 'allow', 'approve', 'accept']
@@ -288,7 +297,8 @@ export function describeInteractiveElement(el, index) {
  *
  * 支持：单个字母 A-Z / 数字 0-9 / 具名键（Enter、Escape、Tab、Space、方向键、
  * PageUp/PageDown、Home、End、Delete、Backspace、F1-F12），前缀修饰键
- * Ctrl/Alt/Shift/Meta（含 Control/Option/Cmd/Command/Win/Super 别名）。
+ * Ctrl/Alt/Shift/Meta（别名表见 src/shared/key-modifiers.js：Control/Option/Cmd/
+ * Command/Win/Windows/Super 都认）。
  *
  * @param {string} spec - 按键字符串。
  * @returns {{ok:true, key:string, ctrl?:boolean, alt?:boolean, shift?:boolean, meta?:boolean} |
@@ -303,7 +313,7 @@ export function parseKeySpec(spec) {
   const keyRaw = parts.pop()
   const modifiers = { ctrl: false, alt: false, shift: false, meta: false }
   for (const part of parts) {
-    const modifier = MODIFIER_ALIASES[part.toLowerCase()]
+    const modifier = KEY_MODIFIER_ALIASES[part.toLowerCase()]
     if (!modifier) return { ok: false, reason: 'unknown_modifier:' + part }
     if (modifiers[modifier]) return { ok: false, reason: 'duplicate_modifier:' + part }
     modifiers[modifier] = true
@@ -319,18 +329,36 @@ export function parseKeySpec(spec) {
 }
 
 /**
- * 单个主键规范化成 KeyboardEvent.key 的值。
- * @param {string} raw - 用户给的键名。
- * @returns {string} 规范键名；不认识返回空串。
+ * 单个主键规范化成 `KeyboardEvent.key` 的真值。
+ *
+ * 两步分开是有原因的：词表（`src/shared/key-names.js`）回答「这串字是哪个键、
+ * 在三个环境里各是什么值」，这里回答「这个键允不允许打进页面」。
+ * 合并成一步的话，将来谁给词表加一个键就顺手把它派发了出去。
+ *
+ * @param {string} raw - 用户或模型写的键名。
+ * @returns {string} `KeyboardEvent.key` 的真值；不允许或不认识时返回空串。
  */
 function canonicalKey(raw) {
   const text = String(raw ?? '').trim()
   if (!text) return ''
-  if (/^[a-zA-Z]$/.test(text)) return text.toUpperCase()
-  if (/^[0-9]$/.test(text)) return text
-  if (/^F([1-9]|1[0-2])$/i.test(text)) return text.toUpperCase()
-  const named = NAMED_KEYS[text.toLowerCase()]
-  return named ?? ''
+  const name = keyNameOf(text)
+  if (!name || !isDispatchableKey(text, name)) return ''
+  // 空格键在这里就变成 `' '` 了：词表给的是 DOM 的真值，不是给人看的名。
+  return domKeyOf(text)
+}
+
+/**
+ * 这个键允不允许派发给页面（策略，见 `DISPATCHABLE_KEY_SPELLINGS`）。
+ * @param {string} spelling - 用户或模型写的原文（已 trim）。
+ * @param {string} name - 它对应的规范键名。
+ * @returns {boolean} 允许与否。
+ */
+function isDispatchableKey(spelling, name) {
+  // 单字母与数字：派发出去就是打一个字符，页面本来也收这种事件。
+  if (/^[A-Z0-9]$/.test(name)) return true
+  // 功能键只到 F12：词表管到 F24（宿主注册热键用得到），派发这一侧历来不放开。
+  if (/^F\d+$/.test(name)) return /^F([1-9]|1[0-2])$/.test(name)
+  return DISPATCHABLE_KEY_SPELLINGS.includes(spelling.toLowerCase())
 }
 
 /**
@@ -355,4 +383,44 @@ export function normalizeConfirmSpeech(text) {
   if (ALLOW_WORDS.includes(normalized)) return 'allow'
   if (DENY_WORDS.includes(normalized)) return 'deny'
   return ''
+}
+
+/**
+ * 确认条的目标描述：把 ref 翻译成「点击「插件」（e12）」这类人能判断的文案。
+ *
+ * 为什么不能只显示 `describeUiAction` 的结果：协议层只知道动作名和第一个参数，
+ * `ui_click` 只能显示 `ui_click: e12` —— 用户看不到自己要批准的是哪个按钮
+ *（尤其 ui_snapshot 也会拍到设置面板里的危险开关），二次确认就退化成橡皮图章。
+ * 有快照信息时用可读名；没有（快照被新动作覆盖/元素没名字）时退回原描述。
+ *
+ * @param {object} request - {action, params}。
+ * @param {Function} t - 翻译函数。
+ * @param {Function} describeUiAction - UI 动作描述函数（回退用）。
+ * @param {Function} infoFor - a11yBridge.infoFor，查 ref 的可读信息。
+ * @returns {string} 确认条描述文本。
+ */
+export function describeConfirmTarget(request, t, describeUiAction, infoFor) {
+  const action = String(request?.action ?? '')
+  const params = request?.params && typeof request.params === 'object' ? request.params : {}
+  const fallback = () => describeUiAction(action, params)
+  try {
+    if (action === 'ui_key') return t('globalConfirmKey', { key: String(params.key ?? '') })
+    if (action === 'ui_click' || action === 'ui_type') {
+      const info = typeof infoFor === 'function' ? infoFor(params.ref) : null
+      const name = typeof info?.name === 'string' && info.name ? info.name : ''
+      if (action === 'ui_type') {
+        const raw = String(params.text ?? '')
+        // 输入内容预览截断：确认条不是正文展示区（协议上限 4000 字）。
+        const preview = raw.length > 40 ? raw.slice(0, 40) + '…' : raw
+        if (name) return t('globalConfirmType', { name, ref: params.ref, text: preview })
+        if (info) return t('globalConfirmTypeFallback', { ref: params.ref, text: preview })
+        return fallback()
+      }
+      if (name) return t('globalConfirmClick', { name, ref: params.ref })
+      return fallback()
+    }
+    return fallback()
+  } catch {
+    return fallback()
+  }
 }

@@ -9,8 +9,6 @@
  *
  * 用法：node test/a11y.test.mjs
  */
-import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import {
   A11Y_REF_PREFIX,
   MAX_SNAPSHOT_ELEMENTS,
@@ -23,7 +21,6 @@ import {
   isUnsafeClickTarget,
 } from '../src/client/pure/a11y.js'
 
-const root = fileURLToPath(new URL('..', import.meta.url))
 
 let passed = 0
 let failed = 0
@@ -52,17 +49,10 @@ function makeElement(props = {}) {
 }
 
 /* ================================================================ */
-console.log('纯函数约束（Node 可原生 import，不碰浏览器 API）')
-{
-  const raw = fs.readFileSync(root + '/src/client/pure/a11y.js', 'utf8')
-  const code = raw
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^\s*\/\/.*$/gm, '')
-  check('不依赖 window/document/navigator',
-    !/\bwindow\.|\bdocument\.|navigator\./.test(code),
-    'a11y 纯函数要能在 Node 里 import，浏览器 API 由调用方传入')
-  check('不依赖 React', !/\bReact\b/.test(code))
-}
+// 「a11y.js 不碰浏览器全局 / 不依赖 React」这两条形状断言删了（§8.34 批次 0）：
+// `test/bundle-sync.test.mjs` 对**构建真正合并的每个文件**跑同一条正则，
+// 名单来自 esbuild 的 import 图，不在名单里的文件另有「孤儿文件」判据兜住 ——
+// 比这里硬编码一个路径更不遗漏。这里只剩真行为的单元测试。
 
 /* ================================================================ */
 console.log('\n常量与上限')
@@ -182,7 +172,11 @@ console.log('\nparseKeySpec：合法按键')
   expectKey('Escape', 'Escape')
   expectKey('enter', 'Enter')
   expectKey('TAB', 'Tab')
-  expectKey('Space', 'Space')
+  // 空格键的 `KeyboardEvent.key` 是一个空格字符，不是 `'Space'`（DOM 规范定的）。
+  // 4.3d 之前这里返回 `'Space'`，靠调用方（main.js 的 ui_key 分支）现场换成 `' '` ——
+  // 换的地方写错或漏换，派出去的就是一个页面认不出来的键。现在词表直接给真值。
+  expectKey('Space', ' ')
+  expectKey('space', ' ')
   expectKey('ArrowUp', 'ArrowUp')
   expectKey('pagedown', 'PageDown')
   expectKey('Home', 'Home')
@@ -204,6 +198,8 @@ console.log('\nparseKeySpec：合法按键')
   check('Control 别名 → ctrl', parseKeySpec('Control+A')?.ctrl === true)
   check('Cmd 别名 → meta', parseKeySpec('Cmd+Z')?.meta === true)
   check('Option 别名 → alt', parseKeySpec('Option+Enter')?.alt === true)
+  check('Windows 别名 → meta（4.3b：修饰键词表已和快捷键链路共用）',
+    parseKeySpec('Windows+K')?.meta === true)
   check('修饰键大小写/空白不敏感', parseKeySpec(' ctrl + shift + p ')?.shift === true)
 }
 

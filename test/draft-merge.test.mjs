@@ -12,7 +12,7 @@
  *   纯函数现在住在 src/client/pure/draft.js，
  *   **原生 import** 即可（它们不依赖任何浏览器 API）——
  *   不再需要「从 2000 行的大文件里提取源码再求值」那种 hack。
- *   产物 lib/client.js 由 scripts/bundle-client.mjs 从同一份源码内联生成。
+ *   产物 lib/client.js 由 scripts/build-client.mjs 从同一份源码合并生成。
  */
 import { mergeDraft, syncUserEdit } from '../src/client/pure/draft.js'
 

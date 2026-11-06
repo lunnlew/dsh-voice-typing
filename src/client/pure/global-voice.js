@@ -20,12 +20,42 @@ export const VOICE_TEXT_MAX = 4000
 export const GLOBAL_VAD_PROCESSOR = 'dsh-voice-typing-vad'
 
 /**
+ * 浮层实际用上的采集路径（批次 10，任务 #38）。
+ *
+ * 为什么要收成一张表：这个值会同时出现在**四个地方** ——
+ * 客户端的调试快照、上报给宿主的 `client.path`、宿主的 `stats.capture.path`、
+ * 以及判据里期望的那个值。四处各写一遍字面量，就等于让测试去猜生产的措辞
+ * （§8.43 那张路由表是同一个病：写法一漂，判据就空转）。
+ *
+ * - `worklet`：首选路径，AudioWorklet 在音频线程跑 VAD，后台不被定时器节流；
+ * - `script-processor`：回退路径，主线程回调，窗口隐藏时可能被节流；
+ * - `none`：**两条都没搭起来**（此时浮层不会进「聆听中」，见 §8.32 那个洞）。
+ */
+export const GLOBAL_CAPTURE_PATHS = {
+  worklet: 'worklet',
+  scriptProcessor: 'script-processor',
+  none: 'none',
+}
+
+/**
  * VAD 默认参数（可被调用方覆盖）。
  *
  * - threshold/minGate/maxGate：门限的绝对下限、自适应底噪门限的夹取范围；
  * - startFrames：连续多少帧超过门限才算「开口」（防爆音/键盘声误触）；
  * - silenceFrames：连续多少帧低于门限才算「说完」；
- * - maxFrames：单段最长帧数，到点强制切段（防内存无限增长）。
+ * - maxFrames：单段最长帧数，到点强制切段（防内存无限增长）；
+ * - preRollMs：**开口前保留多少毫秒音频**（预录环时长）。
+ *
+ * preRollMs 为什么必须按毫秒给、不能跟着 startFrames 走：
+ *   「开口」判定本身就滞后 —— 声音由弱到强要连续几帧压过自适应门限才报 start，
+ *   轻声的第一个字（唤醒词就是这种）往往整段落在滞后窗口里。装机实测用合成的
+ *   「小鱼，今天下午三点开会」喂假麦克风，真实起点 1.30s、start 判定 1.83s，
+ *   滞后约 530ms，切出来的段第一句就是「今天下午」，唤醒词根本不在段里，
+ *   于是浮层每条都报 wake-miss（见 docs §8.33）。
+ *   之前预录环的上界写的是 `startFrames`（3 帧）：Worklet 每帧 128 采样，
+ *   48kHz 下 3 帧只有 **8ms**，等于没留；回退路径每帧 4096 采样才有 256ms。
+ *   同一条参数在两条路径差 30 倍，就是「帧数」当参数的代价 —— 所以这里换成毫秒，
+ *   由主线程按各自的 quantum 换算成帧数。
  */
 export const DEFAULT_VAD_OPTIONS = {
   threshold: 0.012,
@@ -36,6 +66,10 @@ export const DEFAULT_VAD_OPTIONS = {
   startFrames: 3,
   silenceFrames: 40,
   maxFrames: 11250,
+  preRollMs: 600,
+  // 默认按 AudioWorklet 的 128 采样/帧换算（48kHz 下 225 帧 = 600ms）。
+  // 调用方要按**实际**采样率与 quantum 覆盖它：见 vadFramesForMs。
+  preRollFrames: vadFramesForMs(600, 48000, 128),
 }
 
 /**
@@ -49,6 +83,11 @@ export const DEFAULT_VAD_OPTIONS = {
  *   speechFrames—— 当前语音段累计帧数（诊断/上限用）。
  *
  * @returns {object} 初始状态。
+ *
+ * **函数体内不要引用 import 进来的名字**：本函数会被 `vadWorkletSource()`
+ * 用 `Function.prototype.toString()` 原样嵌进 AudioWorklet 脚本文本，
+ * 那里没有模块作用域，引用外部绑定是运行期 ReferenceError。
+ * 所以底噪起点写的是字面量 0.004（与 `src/shared/gate.js` 的 `INITIAL_GATE_STATE` 同值）。
  */
 export function createVadState() {
   return {
@@ -73,6 +112,11 @@ export function createVadState() {
  * @param {number} rms - 本帧 RMS 能量。
  * @param {object} [opts] - 覆盖 DEFAULT_VAD_OPTIONS 的参数。
  * @returns {{state: object, event: 'start'|'end'|null, gate: number}} 本帧判定。
+ *
+ * 与 `createVadState` 同一条约束：会被 toString() 内联进 AudioWorklet，
+ * 函数体内只能用参数与局部量（底噪起点因此留成字面量，不引 `INITIAL_GATE_STATE`）。
+ * 它与 `/asr-stream` 的门限状态机（`src/shared/gate.js`）是**两条判据**：
+ * 这条要开口去抖 + 长端点 + 事件，那条只管「这帧喂不喂解码器」，共用算法会两边都拧巴。
  */
 export function advanceVad(state, rms, opts) {
   const prev = state || { noiseFloor: 0.004, inSpeech: false, silentFrames: 0, loudFrames: 0, speechFrames: 0 }
@@ -228,6 +272,8 @@ export function vadWorkletSource(processorName = GLOBAL_VAD_PROCESSOR, options =
     startFrames: Math.max(1, Math.floor(Number(options?.startFrames) || 3)),
     silenceFrames: Math.max(1, Math.floor(Number(options?.silenceFrames) || 40)),
     maxFrames: Math.max(1, Math.floor(Number(options?.maxFrames) || 11250)),
+    // 预录环：帧数由主线程按实际采样率/quantum 算好传进来（worklet 里没有「毫秒」概念）。
+    preRollFrames: Math.max(1, Math.floor(Number(options?.preRollFrames) || 225)),
   }
   return `// 由 src/client/pure/global-voice.js 的 vadWorkletSource() 生成，勿手改。
 const createVadState = (${createVadState.toString()});
@@ -239,7 +285,7 @@ class GlobalVoiceVadProcessor extends AudioWorkletProcessor {
     const passed = (options && options.processorOptions) || {};
     this.options = Object.assign({}, DEFAULT_OPTIONS, passed);
     this.state = createVadState();
-    // 开口前的预录环：把触发 start 的那几帧也带上，否则第一个字会被切掉。
+    // 开口前的预录环：把 start 判定滞后掉的那段音频带上，否则轻声的第一个字会被切掉。
     this.pre = [];
     this.segment = [];
     this.segmentFrames = 0;
@@ -291,9 +337,13 @@ class GlobalVoiceVadProcessor extends AudioWorkletProcessor {
       if (this.segmentFrames >= this.options.maxFrames) this._emitSegment(true);
       return true;
     }
-    // 空闲：只保留最近 startFrames 帧作预录，别无限缓存静音。
+    // 空闲：只保留最近 preRollFrames 帧作预录，别无限缓存静音。
+    // 上界用的是帧数参数而不是 startFrames：开口判定本身滞后半秒级，
+    // startFrames 那几帧（48kHz 下 8ms）一个字都补不回来。
+    // 为什么不能用 startFrames 补开头（§8.33）、以及这里为什么是主线程算好的帧数，
+    // 见 DEFAULT_VAD_OPTIONS 的 preRollMs 注释。
     this.pre.push(frame);
-    while (this.pre.length > this.options.startFrames) this.pre.shift();
+    while (this.pre.length > this.options.preRollFrames) this.pre.shift();
     return true;
   }
 }
@@ -495,8 +545,8 @@ export function pickSessionId(snapshot, options = {}) {
 
 /* ================= v3 唤醒词匹配 ================= */
 
-/** 开头可忽略的语气词（呃/喂/嗯/我说，可重复）。 */
-const WAKE_FILLER_PATTERN = /^(?:呃+|喂+|嗯+|我说)/
+/** 开头可忽略的语气词（可重复）。「你好/嗨/嘿/请问」等也是常见的喊话前缀。 */
+const WAKE_FILLER_PATTERN = /^(?:呃+|喂+|嗯+|啊+|哎+|诶+|唉+|我说|你好|您好|嗨+|嘿+|哈喽|hello|hi|请问|麻烦|那个|就是)/
 
 /**
  * 唤醒/剩余文本边界上的「噪声」：空白、中英文标点、引号与括号。
@@ -513,6 +563,156 @@ function stripWakeLeadNoise(text) {
   let start = 0
   while (start < text.length && WAKE_EDGE_NOISE_PATTERN.test(text[start])) start += 1
   return text.slice(start).trim()
+}
+
+/**
+ * 单字母唤醒词的「同音字」容错表。
+ *
+ * 唤醒词里带英文字母时（默认「小D」），ASR 经常把它识别成同音汉字：
+ * 「小D」→「小迪 / 小弟 / 小地 / 小滴 / 小底 / 小低 / 小第 / 小帝」。
+ * 2 字唤醒词按评审要求必须精确匹配（避免「小区门口」「小张来了」误唤醒），
+ * 但「同音字」不是任意错字：把已知同音汉字规范化回字母后，匹配就变成精确匹配，
+ * 既恢复可用性，又不会把「小张」误判成「小D」。
+ *
+ * 只收录单字、常见读法的同音字；多字字母名（如「艾克斯」）不在此表，
+ * 这类唤醒词建议直接用 3 个字以上（已有 1 字容错）。
+ */
+const LETTER_HOMOPHONE_TO_LETTER = (() => {
+  const groups = {
+    // 注意：`地/的/得/德`（以及词频很高的字）故意不收——它们会让「小的明白」
+    // 「小地方」这类自然短语误唤醒「小D」。只保留短词场景里真正常见的同音字。
+    a: '诶欸哎啊阿艾',
+    b: '比毕必币笔',
+    c: '西希熙习',
+    d: '迪弟滴底低第帝递',
+    e: '伊一依医衣',
+    f: '艾福夫',
+    g: '吉记基',
+    j: '杰',
+    k: '开',
+    l: '艾勒',
+    m: '艾姆',
+    n: '恩',
+    o: '欧',
+    p: '批屁',
+    q: '扣',
+    r: '阿尔',
+    s: '艾斯',
+    t: '提',
+    u: '优',
+    v: '维',
+    w: '达布留',
+    x: '艾克斯',
+    y: '歪',
+    z: '贼',
+  }
+  const map = Object.create(null)
+  for (const [letter, chars] of Object.entries(groups)) {
+    for (const ch of chars) if (!(ch in map)) map[ch] = letter
+  }
+  return map
+})()
+
+/**
+ * 常见同音/形近汉字的归一表（唤醒词里出现的字）。
+ *
+ * ASR 对短词很容易写成同音字：小→晓/筱/肖，你→尼，好→号，鱼→渔。
+ * 和字母同音表一样，这只是把已知同音字规范化回同一个字，仍要求**逐字**匹配，
+ * 不会把任意错字都放进来（「小张」不在表里，仍不会误唤醒）。
+ */
+const CJK_HOMOPHONE_TO_BASE = (() => {
+  const groups = {
+    小: '晓筱肖萧消宵销硝',
+    你: '尼泥拟',
+    好: '号毫',
+    助: '住注祝驻',
+    手: '首',
+    同: '童桐',
+    鱼: '渔',
+  }
+  const map = Object.create(null)
+  for (const [base, chars] of Object.entries(groups)) {
+    for (const ch of chars) if (!(ch in map)) map[ch] = base
+  }
+  return map
+})()
+
+/**
+ * 单个字符的唤醒比较规范形：NFKC（全角→半角）→ 小写 → 同音字/同音字母归一。
+ * @param {string} ch - 单个字符。
+ * @returns {string} 规范形（可能仍是一个字符）。
+ */
+function wakeCanonChar(ch) {
+  const raw = String(ch ?? '')
+  if (!raw) return ''
+  let normalized = raw
+  try {
+    normalized = raw.normalize('NFKC')
+  } catch {
+    /* 老引擎没有 normalize：用原字符 */
+  }
+  const lower = normalized.toLowerCase()
+  return CJK_HOMOPHONE_TO_BASE[normalized] ?? LETTER_HOMOPHONE_TO_LETTER[lower] ?? lower
+}
+
+/**
+ * 单个字符是不是唤醒词边界噪声（空白/标点/引号/括号）。
+ * @param {string} ch - 单个字符。
+ * @returns {boolean} 是否噪声。
+ */
+function isWakeNoiseChar(ch) {
+  return Boolean(ch) && WAKE_EDGE_NOISE_PATTERN.test(ch)
+}
+
+/**
+ * 唤醒词里是否至少有一个「有内容」的字符。
+ *
+ * 纯标点唤醒词（配置写成 `.` / `。`）不是有效唤醒词：不这样校验的话
+ * `matchHeadIgnoringSpaces` 会消耗 0 个字符却返回命中，待机过滤器整体失效，
+ * 环境闲聊会被当成命令发出去（评审 P2）。
+ * @param {string} wake - 唤醒词。
+ * @returns {boolean} 是否含有效字符。
+ */
+function wakeHasContent(wake) {
+  for (const ch of String(wake ?? '')) {
+    if (!isWakeNoiseChar(ch) && !/\s/.test(ch)) return true
+  }
+  return false
+}
+
+/**
+ * 从 head 开头逐个字符匹配唤醒词（忽略唤醒词内部空白/全半角/同音字）。
+ *
+ * 按**码点**遍历（而不是 UTF-16 code unit），避免 emoji/代理对把
+ * 「视觉 2 字」的唤醒词算成 3~4 个字符、从而错误获得模糊容错。
+ *
+ * @param {string} head - 已剥掉开头语气词/标点的文本。
+ * @param {string} wake - 唤醒词（原始大小写/全半角）。
+ * @returns {number} 命中时返回消耗到的 head **code unit** 下标；未命中返回 -1。
+ */
+function matchHeadIgnoringSpaces(head, wake) {
+  const wakeChars = [...String(wake ?? '')].filter((ch) => !isWakeNoiseChar(ch) && !/\s/.test(ch))
+  if (!wakeChars.length) return -1
+  let hi = 0
+  for (const wakeChar of wakeChars) {
+    while (hi < head.length && /\s/.test(head[hi])) hi += 1
+    if (hi >= head.length) return -1
+    const headChar = String.fromCodePoint(head.codePointAt(hi))
+    if (wakeCanonChar(headChar) !== wakeCanonChar(wakeChar)) return -1
+    hi += headChar.length
+  }
+  return hi > 0 ? hi : -1
+}
+
+/**
+ * 把字符串按唤醒规范形逐字符（码点）转换（用于编辑距离比较）。
+ * @param {string} text - 文本。
+ * @returns {string} 规范形字符串。
+ */
+function wakeCanonString(text) {
+  let out = ''
+  for (const ch of String(text ?? '')) out += wakeCanonChar(ch)
+  return out
 }
 
 /**
@@ -556,80 +756,220 @@ function withinOneEdit(a, b) {
  * v3 唤醒词匹配。
  *
  * 为什么要容忍语气词/标点/一个字的误差：
- *   用户是**说话**，不是打字。识别结果经常是「嗯，小D，打开设置」、
- *   「小滴打开设置」（同音字错一个）。如果唤醒词必须逐字精确、且必须从
+ *   用户是**说话**，不是打字。识别结果经常是「嗯，小鱼，打开设置」、
+ *   「小渔打开设置」（同音字错一个）。如果唤醒词必须逐字精确、且必须从
  *   第一个字开始，用户会喊很多遍都唤不醒 —— 这比误唤醒更伤体验。
  *
  * 但误唤醒的代价也很大（常开麦待机，任何环境闲聊都可能被当成命令），所以：
- *   - 只允许**开头**匹配（前 4 个字符窗口内），句中任意位置出现一律不算；
- *   - 唤醒词 ≥2 字时才允许 1 个字的编辑距离（单字唤醒词没有容错空间）；
- *   - 唤醒词为空 = 关闭唤醒词（返回不匹配，调用方走 v2 原逻辑）。
+ *   - 只允许**开头**匹配（剥离语气词/标点后），句中任意位置出现一律不算；
+ *   - 唤醒词 ≥3 个字时才允许 1 个字的编辑距离（2 字词只做同音归一）；
+ *   - 唤醒词为空/纯标点 = 无效（返回不匹配，调用方走 v2 原逻辑）。
  *
  * @param {string} text - 已做 prepareVoiceText 的识别文本。
- * @param {string} wakeWord - 配置里的唤醒词（可能带首尾空白）。
- * @returns {{matched:boolean, rest:string, via:'head'|'fuzzy'|''}}
+ * @param {string} wakeWord - 配置里的唤醒词（可能带首尾空白/多个别名）。
+ * @returns {{matched:boolean, rest:string, via:'head'|'fuzzy'|'', consumed:number}}
  *   matched=是否命中；rest=去掉唤醒词后的剩余命令（未命中时是原文本）；
- *   via=命中方式（head 精确开头 / fuzzy 容错 1 字 / '' 未命中）。
+ *   via=命中方式（head 精确/同音开头，fuzzy 容错 1 字，'' 未命中）；
+ *   consumed=命中的唤醒词在原文里消耗到的下标（未命中为 0）。
  */
 export function matchWakeWord(text, wakeWord) {
   const rawText = String(text ?? '')
   const rawWake = String(wakeWord ?? '').trim()
   // 空唤醒词 = 关闭：把原文原样交回调用方（rest 必须是原文，别丢内容）。
-  if (!rawWake) return { matched: false, rest: rawText, via: '' }
+  if (!rawWake) return { matched: false, rest: rawText, via: '', consumed: 0 }
 
-  // 1) 剥掉开头的语气词与标点：定位「唤醒词可能开始的位置」。
-  //    循环处理「标点 + 语气词 + 标点」的混排（最多 8 轮防空转）。
+  // 支持「别名唤醒词」：用 | 或中文逗号/顿号分隔多个说法，例如
+  //   「小鱼|小渔|你好小鱼」
+  // ASR 对同一个人名/短词可能给出不同结果，多个别名能明显提高唤醒成功率
+  //（最多取前 8 个有效别名，避免配置写成超长列表）。
+  const aliases = splitWakeWordAliases(rawWake)
+  for (const alias of aliases) {
+    const hit = matchOneWakeWord(rawText, alias)
+    if (hit.matched) return hit
+  }
+  return { matched: false, rest: rawText, via: '', consumed: 0 }
+}
+
+/**
+ * 把配置里的唤醒词拆成别名列表（过滤纯标点/空白别名）。
+ * @param {string} rawWake - 配置值。
+ * @returns {string[]} 去空白后的有效别名（最多 8 个）。
+ */
+function splitWakeWordAliases(rawWake) {
+  return String(rawWake ?? '')
+    .split(/[|｜,，、;；]/)
+    .map((part) => part.trim())
+    .filter((part) => part && wakeHasContent(part))
+    .slice(0, 8)
+}
+
+/**
+ * 单个唤醒词的匹配（内部实现，别名循环用）。
+ *
+ * 从原文起点以及**每一个**语气词/标点被剥掉后的位置各试一次：
+ * 只在 0 位直比的话，像「嗯，你好小鱼」这种「唤醒词本身以语气词开头」的
+ * 配置会在剥掉前导语气词后再也匹配不上（评审 P2）。
+ *
+ * @param {string} rawText - 识别文本。
+ * @param {string} rawWake - 单个唤醒词（已 trim、非空）。
+ * @returns {{matched:boolean, rest:string, via:'head'|'fuzzy'|'', consumed:number}} 匹配结果。
+ */
+function matchOneWakeWord(rawText, rawWake) {
+  if (!wakeHasContent(rawWake)) return { matched: false, rest: rawText, via: '', consumed: 0 }
+
+  // 候选起点：0 与每次剥离「标点 + 语气词 + 标点」后的位置（最多 8 轮防空转）。
+  const starts = [0]
   let start = 0
   for (let guard = 0; guard < 8; guard += 1) {
     const before = start
-    while (start < rawText.length && WAKE_EDGE_NOISE_PATTERN.test(rawText[start])) start += 1
+    while (start < rawText.length && isWakeNoiseChar(rawText[start])) start += 1
     const filler = WAKE_FILLER_PATTERN.exec(rawText.slice(start))
     if (filler) start += filler[0].length
     if (start === before) break
+    starts.push(start)
   }
-  const head = rawText.slice(start)
-  if (!head) return { matched: false, rest: rawText, via: '' }
-  const lowerHead = head.toLowerCase()
-  const lowerWake = rawWake.toLowerCase()
 
-  // 2) 精确开头匹配（大小写不敏感）：唤醒词 + 命令连说也走这条路。
-  if (lowerHead.startsWith(lowerWake)) {
-    return {
-      matched: true,
-      rest: stripWakeLeadNoise(head.slice(rawWake.length)),
-      via: 'head',
+  for (const at of starts) {
+    const head = rawText.slice(at)
+    if (!head) continue
+    // 精确/同音开头匹配（忽略空白、大小写、全半角、同音字）。
+    const consumedInHead = matchHeadIgnoringSpaces(head, rawWake)
+    if (consumedInHead >= 0) {
+      return {
+        matched: true,
+        rest: stripWakeLeadNoise(head.slice(consumedInHead)),
+        via: 'head',
+        consumed: at + consumedInHead,
+      }
     }
-  }
-
-  // 3) 容错 1 字：**唤醒词至少 3 个字**才启用。
-  //
-  // 为什么 2 字不启用（评审 P1-1）：对「小D」这种两字唤醒词，1 个字容错 =
-  // 只要求「小」对得上、第二个字随便 —— 「小区门口」「小张来了」都会唤醒，
-  // 随即把尾巴当命令送进会话（隐私泄漏 + 命令被吞掉首字）。两字词必须精确匹配
-  //（仍允许开头语气词/标点被剥掉，见上一步）。
-  //
-  // 匹配窗口锚定在**开头**（不允许前面有任意前缀）：这是「不允许句中匹配」的
-  // 落地方式 —— 否则「请打开小D」会因为唤醒词出现在前 4 个字符窗口里而误唤醒。
-  // 语气词/标点已在上面剥掉，正常的「嗯，小D…」不会损失容错。
-  if (rawWake.length >= 3) {
-    // 编辑距离 1 可能是错一个字 / 多一个字 / 少一个字，对应三种消耗长度；
-    // 先试「等长替换」（最常见，同音字），再试多/少一个字。
-    for (const consumed of [rawWake.length, rawWake.length + 1, rawWake.length - 1]) {
-      if (consumed < 1 || consumed > head.length) continue
-      const candidate = head.slice(0, consumed)
-      if (candidate.length < Math.max(1, rawWake.length - 1)) continue
-      if (withinOneEdit(candidate.toLowerCase(), lowerWake)) {
-        return {
-          matched: true,
-          rest: stripWakeLeadNoise(head.slice(consumed)),
-          via: 'fuzzy',
+    // 容错 1 字：唤醒词至少 3 个字才启用（2 字词只做同音归一，避免「小张来了」误唤醒）。
+    if (rawWake.length >= 3) {
+      for (const size of [rawWake.length, rawWake.length + 1, rawWake.length - 1]) {
+        if (size < 1 || size > head.length) continue
+        if (size < Math.max(1, rawWake.length - 1)) continue
+        const candidate = head.slice(0, size)
+        if (withinOneEdit(wakeCanonString(candidate), wakeCanonString(rawWake))) {
+          return {
+            matched: true,
+            rest: stripWakeLeadNoise(head.slice(size)),
+            via: 'fuzzy',
+            consumed: at + size,
+          }
         }
       }
     }
   }
 
-  // 4) 开头附近都不是唤醒词：待机时必须丢弃这句话（不能把它当命令发出去）。
-  return { matched: false, rest: rawText, via: '' }
+  // 开头附近都不是唤醒词：待机时必须丢弃这句话（不能把它当命令发出去）。
+  return { matched: false, rest: rawText, via: '', consumed: 0 }
+}
+
+/**
+ * 已唤醒（活跃态）时决定「这句话要不要发、发什么」。
+ *
+ * 唤醒词只用于进入活跃态，**不应该出现在会话消息里**：
+ *   - 只说了唤醒词（含同音字/别名）→ `wake-only`，不发送；
+ *   - 「唤醒词 + 分隔符 + 命令」（如「小鱼，打开插件」）→ `command`，只发命令部分；
+ *   - 唤醒词后没有分隔符（如「小鱼吃什么」「小渔村在哪里」）→ 按普通句子整句发送，
+ *     不能因为开头恰好是唤醒词就吞掉前半句；
+ *   - 普通对话 → `command`，原样发送。
+ *
+ * @param {string} text - 已 prepareVoiceText 的识别文本。
+ * @param {string} wakeWord - 配置的唤醒词（可含别名）；空串时应走 v2 行为。
+ * @returns {{action:'wake-only'|'command', text:string}} action=处理方式；
+ *   text=要发送的文本（wake-only 时为空串）。
+ */
+export function resolveActiveUtterance(text, wakeWord) {
+  const rawText = String(text ?? '')
+  const hit = matchWakeWord(rawText, wakeWord)
+  if (!hit.matched) return { action: 'command', text: rawText }
+  if (!hit.rest) return { action: 'wake-only', text: '' }
+
+  // 「小鱼 小鱼」：剥完仍是唤醒词 → 也只算喊了一声。
+  const inner = matchWakeWord(hit.rest, wakeWord)
+  if (inner.matched && !inner.rest) return { action: 'wake-only', text: '' }
+
+  // 唤醒词与命令之间必须有明确分隔（标点/空白）才剥离，否则整句发送。
+  const after = rawText.slice(hit.consumed)
+  const separated = Boolean(after) && (isWakeNoiseChar(after[0]) || /\s/.test(after[0]))
+  if (!separated) return { action: 'command', text: rawText }
+  return { action: 'command', text: hit.rest }
+}
+
+/**
+ * 按唤醒词的文字脚本推断「待机识别语言」。
+ *
+ * 为什么不能直接依赖 `language=auto`：SenseVoice 的 auto 是整句语言判定，
+ * 对 2~3 个字的短唤醒词极不稳定 —— 实测默认「小鱼」在 auto 下被识别成英文
+ * 「I.」，唤醒词永远匹配不上。但也不能把全局语言写死成中文（英文/日文/韩文
+ * 用户会废掉）。折中：待机识别按唤醒词本身推断语言，活跃对话仍沿用用户配置
+ *（默认 auto，由宿主按系统语言解析）。
+ *
+ * 别名唤醒词（`小鱼|小渔`）取第一个可判断的别名；中英混写优先按中文。
+ *
+ * @param {string} wakeWord - 配置里的唤醒词（可含多个别名）。
+ * @returns {'zh'|'en'|'ja'|'ko'|'auto'} 推断出的语言；无法判断时 auto。
+ */
+export function inferWakeLanguage(wakeWord) {
+  for (const part of String(wakeWord ?? '').split(/[|｜,，、;；]/)) {
+    const text = part.trim()
+    if (!text) continue
+    if (/[\u3040-\u30ff]/.test(text)) return 'ja'
+    if (/[\uac00-\ud7af]/.test(text)) return 'ko'
+    if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(text)) return 'zh'
+    if (/[a-zA-Z]/.test(text)) return 'en'
+  }
+  return 'auto'
+}
+
+/**
+ * 决定「待机唤醒识别」用哪种语言。
+ *
+ * 优先级：**用户显式配置的语言 > 唤醒词脚本 > 系统/应用语言 > auto**。
+ *
+ * 为什么唤醒词脚本排在系统语言前面：默认唤醒词「小鱼」是中文。如果系统语言
+ * 是 en-US，按系统语言发 en 会让中文唤醒词必唤不醒（评审 P1 反例）；
+ * 唤醒词本身就是最可靠的脚本证据。系统语言只用于「唤醒词全是 emoji/数字」
+ * 这类无法判断脚本的情况。
+ *
+ * @param {string} configuredLanguage - 配置里的 language（auto/zh/en/yue/ja/ko）。
+ * @param {string} wakeWord - 唤醒词（可含别名）。
+ * @param {string} [systemLocale] - 系统/应用语言标签（如 navigator.language）。
+ * @returns {'zh'|'en'|'yue'|'ja'|'ko'|'auto'} 待机识别语言。
+ */
+export function resolveWakeLanguage(configuredLanguage, wakeWord, systemLocale) {
+  const configured = String(configuredLanguage ?? 'auto').trim().toLowerCase()
+  const explicit = ['zh', 'en', 'yue', 'ja', 'ko']
+  if (explicit.includes(configured)) return configured
+  const inferred = inferWakeLanguage(wakeWord)
+  if (inferred !== 'auto') return inferred
+  const system = String(systemLocale ?? '').trim().toLowerCase()
+  const systemMap = [
+    ['zh', 'zh'],
+    ['yue', 'yue'],
+    ['ja', 'ja'],
+    ['ko', 'ko'],
+    ['en', 'en'],
+  ]
+  for (const [prefix, language] of systemMap) {
+    if (system.startsWith(prefix)) return language
+  }
+  return 'auto'
+}
+
+/**
+ * 普通识别（非待机唤醒）的语言：显式配置 > 系统/应用语言 > auto。
+ *
+ * 与 resolveWakeLanguage 的区别是不看唤醒词脚本：对话内容可能中英混说，
+ * 不能按唤醒词推断。默认配置 auto 时用系统语言（初始化即「本地默认语言」），
+ * 只有系统语言也识别不了时才交回引擎 auto。
+ *
+ * @param {string} configuredLanguage - 配置里的 language。
+ * @param {string} [systemLocale] - 系统/应用语言标签（如 navigator.language）。
+ * @returns {'zh'|'en'|'yue'|'ja'|'ko'|'auto'} 识别语言。
+ */
+export function resolveAsrLanguage(configuredLanguage, systemLocale) {
+  return resolveWakeLanguage(configuredLanguage, '', systemLocale)
 }
 
 /* ================= 快捷键平台别名 ================= */

@@ -9,6 +9,8 @@
  *   - words（字符串 trim、对象 {correct,replace} 归一化、去空、上限）；
  *   - sanitizeConfig：非法值回退默认 + warnings、越界 clamp、未知键忽略、输出键完整；
  *   - validateConfigPatch：错误聚合、未知键忽略、空串合法、数字字符串强转；
+ *     以及每条拒绝回的是 `src/shared/config-error-codes.js` 里的哪个码（批次 20：
+ *     宿主只报码 + 一句 `detail`，界面那句话由客户端字典出，码就是两端之间的契约）；
  *   - normalizeTtsEngine：trim/小写/非法返回 ''（绝不默认 online）；
  *   - 全局语音 / AI 界面操控的 6 个新键（globalVoice、globalShortcut、
  *     voicePromptMode、uiControl、uiConfirm、globalHotkeyHelper）：
@@ -25,7 +27,11 @@ import {
   normalizeTtsEngine,
   sanitizeConfig,
   validateConfigPatch,
-} from '../lib/config-schema.js'
+} from '../src/host/config-schema.js'
+import {
+  CONFIG_ERROR_REASON_VALUES,
+  isConfigErrorCode,
+} from '../src/shared/config-error-codes.js'
 
 let passed = 0
 let failed = 0
@@ -72,7 +78,7 @@ const DEFAULTS = {
   uiConfirm: true,
   globalHotkeyHelper: false,
   // v3：全局语音待机唤醒词（空串 = 关闭）。
-  wakeWord: '小D',
+  wakeWord: '小鱼',
 }
 
 console.log('== 0. schema 覆盖 35 个配置键 ==')
@@ -165,8 +171,8 @@ console.log('\n== 2. sanitizeConfig：枚举/布尔/数值/字符串/URL/words =
   check('新字符串键 trim（globalShortcut）', config.globalShortcut === 'Ctrl+Alt+V', JSON.stringify(config.globalShortcut))
   check('新枚举大小写归一（voicePromptMode STEER→steer）', config.voicePromptMode === 'steer', JSON.stringify(config.voicePromptMode))
   // v3 唤醒词：非字符串回退默认（不影响常开麦安全，但不能变成 "[object Object]"）。
-  check('wakeWord 非字符串回退默认「小D」并记 warning',
-    config.wakeWord === '小D' && byKey.wakeWord, JSON.stringify(config.wakeWord))
+  check('wakeWord 非字符串回退默认「小鱼」并记 warning',
+    config.wakeWord === '小鱼' && byKey.wakeWord, JSON.stringify(config.wakeWord))
 }
 {
   const { config } = sanitizeConfig({
@@ -191,7 +197,7 @@ console.log('\n== 2. sanitizeConfig：枚举/布尔/数值/字符串/URL/words =
 {
   // v3 唤醒词：默认「小D」；trim；空串合法（= 关闭）；超长截断到 32 并记 warning。
   const def = sanitizeConfig({}, DEFAULTS).config
-  check('wakeWord 默认「小D」', def.wakeWord === '小D', JSON.stringify(def.wakeWord))
+  check('wakeWord 默认「小鱼」', def.wakeWord === '小鱼', JSON.stringify(def.wakeWord))
   const trimmed = sanitizeConfig({ wakeWord: '  小D  ' }, DEFAULTS).config
   check('wakeWord trim（「  小D  」→「小D」）', trimmed.wakeWord === '小D', JSON.stringify(trimmed.wakeWord))
   const off = sanitizeConfig({ wakeWord: '' }, DEFAULTS).config
@@ -290,27 +296,64 @@ console.log('\n== 3. validateConfigPatch：严格校验 + 错误聚合 ==')
   check('wakeWord 空串合法（= 关闭唤醒词）', emptyWake.ok === true && emptyWake.value.wakeWord === '')
 }
 {
+  // 批次 20（docs/architecture-modernization.md §8.62）：拒绝的不只是「有没有拒绝」，
+  // 还钉住**回的是词表内的哪一个码**。宿主那边只报码，界面那句话由客户端字典出，
+  // 所以码就是两端之间的契约 —— 有人把某条规则改成另一个码（或改回句子），这一批会红。
   const cases = [
-    ['布尔键传字符串', { autoSend: 'yes' }],
-    ['数值键传布尔', { readAloudLag: true }],
-    ['整数键传小数', { neuralSpeaker: 1.5 }],
-    ['数值超出范围', { silenceMs: 999999 }],
-    ['字符串键传数字', { model: 123 }],
-    ['URL 传非字符串', { sovitsUrl: 42 }],
-    ['新布尔键传字符串', { uiControl: 'true' }],
-    ['新字符串键传数字', { globalShortcut: 42 }],
-    ['新枚举非法值', { voicePromptMode: 'push' }],
-    ['wakeWord 传数字', { wakeWord: 42 }],
-    ['wakeWord 超长（33 字）', { wakeWord: 'x'.repeat(33) }],
-    ['words 非数组', { words: 'a' }],
-    ['words 条目为空', { words: ['  '] }],
-    ['words 超上限', { words: Array.from({ length: MAX_WORDS + 1 }, (_, i) => 'w' + i) }],
-    ['words 单条超长', { words: ['x'.repeat(MAX_WORD_CHARS + 1)] }],
-    ['配置不是对象', ['array']],
-    ['配置为 null', null],
+    ['布尔键传字符串', { autoSend: 'yes' }, 'not-boolean'],
+    ['数值键传布尔', { readAloudLag: true }, 'not-a-number'],
+    ['整数键传小数', { neuralSpeaker: 1.5 }, 'not-integer'],
+    ['数值超出范围', { silenceMs: 999999 }, 'out-of-range'],
+    ['字符串键传数字', { model: 123 }, 'not-a-string'],
+    ['URL 传非字符串', { sovitsUrl: 42 }, 'not-a-string'],
+    ['新布尔键传字符串', { uiControl: 'true' }, 'not-boolean'],
+    ['新字符串键传数字', { globalShortcut: 42 }, 'not-a-string'],
+    ['新枚举非法值', { voicePromptMode: 'push' }, 'not-in-enum'],
+    ['wakeWord 传数字', { wakeWord: 42 }, 'not-a-string'],
+    ['wakeWord 超长（33 字）', { wakeWord: 'x'.repeat(33) }, 'too-long'],
+    ['words 非数组', { words: 'a' }, 'not-an-array'],
+    ['words 条目为空', { words: ['  '] }, 'words-empty-entry'],
+    ['words 超上限', { words: Array.from({ length: MAX_WORDS + 1 }, (_, i) => 'w' + i) }, 'words-too-many'],
+    ['words 单条超长', { words: ['x'.repeat(MAX_WORD_CHARS + 1)] }, 'words-entry-too-long'],
+    ['URL 协议不对', { sovitsUrl: 'ftp://127.0.0.1:9880' }, 'url-not-http'],
+    ['URL 写法非法', { sovitsUrl: 'not a url' }, 'url-malformed'],
+    ['words 对象缺 correct', { words: [{ replace: 'x' }] }, 'words-missing-correct'],
+    ['words 条目形状不对', { words: [42] }, 'words-entry-shape'],
+    ['配置不是对象', ['array'], 'patch-not-object'],
+    ['配置为 null', null, 'patch-not-object'],
   ]
-  for (const [name, patch] of cases) {
-    check(`拒绝：${name}`, validateConfigPatch(patch).ok === false, JSON.stringify(validateConfigPatch(patch)))
+  const observedCodes = new Set()
+  for (const [name, patch, expectedCode] of cases) {
+    const result = validateConfigPatch(patch)
+    const first = result.errors?.[0] ?? null
+    observedCodes.add(first?.reason ?? '(没有 errors)')
+    check(`拒绝：${name} → 码「${expectedCode}」`,
+      result.ok === false && first?.reason === expectedCode,
+      JSON.stringify(result.errors))
+    // 「哪一条规则不合」之外还得留一句原始信息给排查（第几条、实际值、系统那句报错）。
+    check(`拒绝：${name} 带非空 detail`,
+      typeof first?.detail === 'string' && first.detail.length > 0,
+      JSON.stringify(first))
+  }
+  // 词表完备性：这一层能触发的码 + 只能由路由层给的那三个 + 宿主自己才会碰到的一个，
+  // 必须正好盖住整张表。新增码却没有判据驱动它，这里会红（而不是装机上一个对不上的分支）。
+  // 排除掉的那四个不住在这一层：body-not-json / body-too-large / save-failed 由
+  // `test/voice-ui-host.test.mjs` 的「2b」在真路由上驱动，unknown-spec-type 只有
+  // `src/shared/config-spec.js` 写错 type 才会出现（那是宿主自己的 bug，不是用户的错）。
+  {
+    const onlyFromRoute = ['body-not-json', 'body-too-large', 'save-failed']
+    const hostBugOnly = ['unknown-spec-type']
+    const missing = CONFIG_ERROR_REASON_VALUES.filter(
+      (code) => !observedCodes.has(code) && !onlyFromRoute.includes(code) && !hostBugOnly.includes(code),
+    )
+    check(`这一层驱动的码 + 路由层那三个 + unknown-spec-type 盖住整张表（实测 ${observedCodes.size} 个码）`,
+      missing.length === 0, `这一层没驱动到：${missing.join(', ')}`)
+    const offTable = [...observedCodes].filter((code) => !isConfigErrorCode(code))
+    check('宿主回的原因全在词表内（没有一个句子或自造码）',
+      offTable.length === 0, `词表外：${offTable.join(', ')}`)
+    check('reason 一律是 ASCII 码（宿主不许再把中文塞进 reason）',
+      [...observedCodes].every((code) => /^[\x00-\x7F]+$/.test(code)),
+      JSON.stringify([...observedCodes].filter((code) => /[^\x00-\x7F]/.test(code))))
   }
 }
 {

@@ -107,7 +107,7 @@ function render(overrides = {}) {
     uiConfirm: true,
     globalHotkeyHelper: false,
     // v3：唤醒词（默认「小D」；空串 = 关闭）。
-    wakeWord: '小D',
+    wakeWord: '小鱼',
     ...overrides,
   }
   // 传 t 透传 key，这样断言可以针对稳定的 key 而不是中文文案

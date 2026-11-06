@@ -23,8 +23,10 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
+        # 这里不再写 version：批次 24 起 pnpm 版本只有一个来源 —— package.json 的
+        # `packageManager` 字段。action-setup@v4 在没有 version 输入时就去读它，
+        # 读不到才报错。以前这里是 `version: 9`，于是流水线上跑的 pnpm 跟本机（11.7.0）
+        # 不是一回事，`allowBuilds` 那套开关在 CI 上根本不生效（见 pnpm-workspace.yaml）。
 
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -35,8 +37,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify client bundle is up to date
-        run: pnpm run check:client
-
+      # 原来这里是 `pnpm run check:build`（「产物与源码同步」）。批次 23 起 `lib/` 不再进版本库，
+      # checkout 出来的工作树里根本没有产物，那条比对失去对象（它会把「文件不存在」判成不同步）。
+      # 现在的口径：`pnpm test` 自己先构建两端（scripts/run-tests.mjs），CI 不需要再单独校一遍。
       - name: Run tests
         run: pnpm test

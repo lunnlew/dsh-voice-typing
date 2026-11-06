@@ -1,0 +1,40 @@
+# pnpm 10/11 的「哪些依赖允许跑安装脚本」开关。
+#
+# 为什么住在这个文件而不是 package.json：实测 pnpm 11.7.0 不读 package.json 里的
+# `pnpm.allowBuilds`，也不读 `pnpm.ignoredBuiltDependencies` —— 两种写法装完都照样
+# 报 ERR_PNPM_IGNORED_BUILDS 并以 1 退出。pnpm 11 只认这里。
+#
+# `packages` 这一行现在是给**还在用 pnpm 9 的人**留的兼容行：pnpm 9 看到这个文件、
+# 发现没有 packages 字段，会直接报 `ERROR  packages field missing or empty` 失败（实测）。
+# pnpm 10/11 不需要它（2026-11-05 实测：同一份只有 allowBuilds 的文件，11.7.0 装得动）。
+# CI 以前靠这一行活着，批次 24 之后它装的 pnpm 版本由 package.json 的 `packageManager`
+# 决定（11.7.0），已经不是 pnpm 9 那一档了。本仓库只有一个包，所以列表就是根包自己，
+# 不是真的多包工作区。
+packages:
+  - '.'
+
+# 三个都不放行。理由各不相同，都是 2026-11-05 在这台机器上核过的：
+# - esbuild：postinstall（install.js）只是「找不到平台二进制就去下载」的兜底。
+#   平台包 @esbuild/win32-x64 是它的可选依赖，已经装上，构建今天就在跑
+#   ——lib/index.js、lib/client.js 就是它产的。
+# - uiohook-napi：install 脚本是 node-gyp-build，而包里自带
+#   prebuilds/<平台>/uiohook-napi.node，它优先用现成的、只在没有时才编译。
+#   当前这套 node_modules 就是「脚本没跑」状态下装出来的，
+#   `require('uiohook-napi')` 实测能加载。
+# - msedge-tts：它唯一的生命周期脚本是 `preinstall: npx only-allow pnpm`，
+#   那是「不许用 npm 装」的守卫，跟编译无关；放行等于每次装依赖都要联网拉一个 npx 包。
+#
+# 代价（写清楚，别当成零成本）：哪天真出现「平台可选依赖没装上、prebuilds 里没这个平台」
+# 的机器，兜底脚本不会被跑，报错从「自动补二进制」变成「要手动处理」。
+# 另一条是批次 24 改出来的：CI 以前跑 pnpm 9，它不读这个键（默认全跑安装脚本），
+# 所以这份名单从来没在流水线上生效过；CI 的 pnpm 版本现在与本机同源（package.json 的
+# `packageManager`），这份 false 第一次真的管到 CI。CI 那台机器是 linux-x64，
+# 三个名字各有各的免编译兜底（2026-11-05 逐个核过磁盘）：
+# uiohook-napi 自带 prebuilds/linux-x64 与 linux-arm64，esbuild 的可选依赖里有
+# @esbuild/linux-x64，msedge-tts 那条只有 `only-allow` 守卫。
+# 这三条由 `test/packaging.test.mjs` 第 8 节末尾那条判据逐个核对，
+# 将来换一个「只能现编译」的依赖，它会红。
+allowBuilds:
+  esbuild: false
+  msedge-tts: false
+  uiohook-napi: false

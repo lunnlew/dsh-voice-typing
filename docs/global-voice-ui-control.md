@@ -4,6 +4,48 @@
 证据来源：`app.asar` 只读分析 + 本机已装第三方插件的实测行为。
 完整证据见本次调研的四份原始报告（仅本机留存，不随仓库发布）。
 
+> ## 口径修正（2026-11-06 复核）
+>
+> 这份文件的**结论与协议细节全部核对过，仍然成立**：14 个动作（8 语义 + 6 a11y 原语）、
+> 其中 8 个要确认、参数长度上限（`text` 4000 / `line` 400 / `sessionId` 200 /
+> `workspaceId` 200 / `ref` 40 / `key` 40，超长直接拒绝、不截断）、
+> 认领语义（400 / 404 / 405 / 415）、唤醒后 60 秒回待机、
+> `uiActions` 审计留最近 50 条、快照上限 80 个元素、`wakeWord` 默认「小鱼」、
+> `globalShortcut` 默认 `Ctrl+Alt+V`。
+> **过时的只有位置和行号**，以及两处具体数字，逐条如下 —— 读的时候按这份对照，正文不再重印。
+>
+> **路径**：文中写 `lib/xxx.js` 的宿主**手写**代码，今天全在 `src/host/xxx.js`
+> （批次 23 之后 `lib/` 只剩四份构建产物，且不进版本库）。三处特例：
+> `lib/ui-action-protocol.js` 只是转发入口，真源在 `src/shared/ui-action-protocol.js`；
+> `lib/config-schema.js` 的字段规则（含默认值与长度上限）住在 `src/shared/config-spec.js`，
+> 宿主的 `DEFAULTS` 与客户端的 `UI_DEFAULTS` 都由它派生；
+> `lib/client.js` 现在也**只是产物**，浏览器侧源码在 `src/client/`。
+>
+> **`src/client/main.js` 的行号全部失效**：那个文件当时 3300+ 行，现在 **627 行**，
+> 组件早已按职责拆进 `src/client/dom/`。§1 那两行的现址：
+> 快捷键监听在 `dom/global-voice-overlay.js:1429`（浮层，捕获阶段）与
+> `dom/mic-button.js:2084`（composer 按钮），系统级那条走 §11 的 helper；
+> VAD 分成了两条：**浮层**（要常驻后台，必须绕开隐藏页节流）走 AudioWorklet 优先，
+> 拿不到 worklet 才回退 `ScriptProcessor`（`dom/global-voice-overlay.js:677` 起）；
+> **composer 按钮**照旧用 `createScriptProcessor`（`dom/mic-button.js:1790`），
+> 因为它只在窗口可见时开着，节流影响不到。
+> 所以 §1 那行「VAD 被节流到 1 次/秒」描述的是**改造前**的现状，
+> 正是这份设计要解决的问题，不是今天的限制。
+>
+> **两处具体数字更正**：
+> ① §4/§5 里「确认条挂 30 秒」不完整 —— 客户端取的是 `min(30s, expiresAt - now - 1s)`
+> （`dom/global-voice-overlay.js:1363`），而宿主工具侧默认只等 20 秒
+> （`src/host/index.js` 的 `voiceUiTimeoutMs = 20_000`），
+> 所以确认条实际约 19 秒就收。改这个数要三处一起看，别只动客户端。
+> ② §13.3 列的 `hotkeyHelper.state()` 字段少一个 —— 真实返回是
+> `{ enabled, status, reason, detail, platform, tokenReady }`（`src/host/global-hotkey-helper.js:708`）：
+> `reason` 是 `src/shared/hotkey-reasons.js` 里的**原因码**，`detail` 是排查看的原文、不进界面。
+>
+> **无法核对的部分**：§2 与 §7 里那些 `app.asar/...` 与 `@deepseek-ai/*/lib/client.js:行号`
+> 是本机 DSH 桌面端 **44.7.0** 的只读取证，宿主不随本仓库发布，今天重跑对不上很正常。
+> 它们支撑的是「宿主没有这些扩展点，所以要自建」这条结论 ——
+> 那部分若要复用，请在当前宿主版本上重核一遍。
+
 ---
 
 ## 0. 一句话结论
@@ -205,7 +247,7 @@ v2 追加规则：通用界面操作先 `ui_snapshot`、`ref` 只对最近一次
 - **L2 AI 界面操控**：宿主 `voice_ui` 工具 + `ui-action` SSE + 渲染器执行器 + `/ui-action-result` 回执；首批动作 `state/list_sessions/switch_session/new_session/run_command/send_prompt/stop_generation/toggle_sidebar`；`uiConfirm` 默认二次确认；`/diagnostics.uiActions` 审计；`uiControl` 默认关。
 - **L2 的前置依赖**：执行器与确认条住在全局语音浮层里，所以除了 `uiControl=true` 还需要 `globalVoice=true`（`list_sessions` 例外，宿主直接回答）；只开 `uiControl` 时工具返回 `voice_overlay_disabled`。
 - **v2 通用 a11y（已实现）**：动作协议扩到 14 个（新增 `set_sidebar` / `open_plugins` / `ui_snapshot` / `ui_click` / `ui_type` / `ui_key`）；`ui_snapshot` 返回当前页面可见可交互元素的 ref 快照（上限 80），`ui_click` / `ui_type` / `ui_key` 只按快照 ref 操作；三个原语默认危险（`uiConfirm` 时确认）；确认条支持语音说「允许/拒绝」（整句匹配，该句不发送）；工具 schema 新增 `ref` / `key` / `collapsed` 参数。
-- **v3 唤醒词待机（已实现）**：第 35 个配置键 `wakeWord`（默认「小D」，空串 = 关闭）；全局语音浮层常开麦待机，`matchWakeWord` 开头锚定 + 语气词/标点容错（**≥3 字才允许 1 字容错；2 字必须精确匹配**）；待机时非唤醒内容丢弃不发送（隐私）；唤醒后 60 秒无语音回待机；确认条语音「允许/拒绝」优先于唤醒词；唤醒词只对浮层生效。
+- **v3 唤醒词待机（已实现）**：第 35 个配置键 `wakeWord`（默认「小鱼」，空串 = 关闭）；全局语音浮层常开麦待机，`matchWakeWord` 开头锚定 + 语气词/标点容错（**≥3 字才允许 1 字容错；2 字按同音归一后精确匹配**）；待机时非唤醒内容丢弃不发送（隐私）；唤醒后 60 秒无语音回待机；确认条语音「允许/拒绝」优先于唤醒词；唤醒词只对浮层生效。
 - **L3**：系统级热键由 `lib/global-hotkey-helper.js`（默认关，仅 `globalVoice && globalHotkeyHelper` 时启动）提供：Windows 走 PowerShell 子进程 POST `/hotkey`（token 鉴权）；macOS/Linux 走可选依赖 `uiohook-napi` 进程内监听后直接广播 SSE `global-hotkey`；后台 VAD 用 AudioWorklet。
 - **评审修复（v4，已实现）**：`list_sessions` 读真实 `projections` 字段（title / sessionListMetadata.lastPromptAt + running/blank/cwd）；`ui-action` 带 `expiresAt` 双端同构并在客户端拒绝过期执行（ghost action）；`/voice-prompt` requestId ≤200；POST 路由要求 `application/json`（CSRF 简单请求 415）；卸载时收尾在途工具调用；helper 增加 `globalVoice` 闸门 / `Shift+V` 拒绝 / UTF-8 BOM / 禁用代理 / origin 优先 / native 适配器。
 - **P2/P3 强化（v5，已实现）**：新增 `POST /ui-action-claim` 多窗口认领（JSON-only 415；先到先得/同 client 幂等/404 未知或过期）；客户端执行链路 expires→busy→claim→confirm→execute（认领失败静默跳过）；`/voice-prompt` 只在 sessionController 缺失时走 agents 兜底（controller 抛错直接 502，不再二次注入）；客户端每条识别文本透传 `requestId` 供去重；voice-ui 提示词 section 随 `uiControl` 动态注册/注销；Windows helper 改为 starting→READY→enabled（REGISTER_FAILED/提前退出→failed）并清理临时 .ps1；`ui_type` 文本类白名单、`ui_click` 拒绝外链/file input；`package.json` 增加 `engines.dsh` 与 optional peer `@deepseek-ai/dsh-llm`。
@@ -277,18 +319,19 @@ DSH 在插件加载时注册工具、模型侧的工具表不会热更新 ——
 
 | 键 | 类型 | 默认 | 含义 |
 | --- | --- | --- | --- |
-| `wakeWord` | string，trim，≤32 | `'小D'` | 唤醒词；**空串 = 关闭**（回到 v2：说话直接发送） |
+| `wakeWord` | string，trim，≤32 | `'小鱼'` | 唤醒词；**空串 = 关闭**（回到 v2：说话直接发送） |
 
 - 宿主 `DEFAULTS` + `config-schema.js` SPECS；客户端 `UI_DEFAULTS` / `STRING_LIMITS(32)` / normalizeForSave / 设置面板「语音交互」输入框（zh/en，留空关闭提示）。
 - **只对全局语音浮层生效**；输入框麦克风完全不受影响。
 
 ### 10.3 纯函数 `matchWakeWord(text, wakeWord)`
 
-返回 `{matched, rest, via:'head'|'fuzzy'|''}`：
+返回 `{matched, rest, via:'head'|'fuzzy'|'', consumed}`（`consumed`=命中的唤醒词在原文里消耗到的下标；活跃态用它判断唤醒词与命令之间是否有分隔符）：
 - 空唤醒词 → 不匹配，`rest` 原样返回（关闭）；
-- 开头锚定：先剥开头语气词（呃/喂/嗯/我说）与标点，再比较；不允许句中任意位置匹配；
+- 开头锚定：先剥开头语气词（呃/喂/嗯/我说/你好/您好/嗨/嘿/请问/麻烦/那个/就是）与标点，再比较；不允许句中任意位置匹配；
 - 支持「唤醒词 + 命令连说」：`rest` 是去掉唤醒词后的命令（trim、去前导标点）；
-- **≥3 字**时允许 1 个字容错（同音/口音；等长替换 / 多一字 / 少一字）；**2 字（默认「小D」）必须精确匹配**（否则「小区门口」会误唤醒成命令「门口」、吞命令首字）；
+- **≥3 字**时允许 1 个字容错（同音/口音；等长替换 / 多一字 / 少一字）；**2 字按同音字归一后精确匹配（如「小渔」也算「小鱼」，但「小地/小张」不归一，避免「小地方/小区门口」误唤醒）**；
+- 支持别名：`小鱼|小渔|你好小鱼`（`|`/中文逗号分隔，最多 8 个）；字母/汉字同音归一、全半角、空格、emoji 码点都按「码点」处理；
 - 大小写不敏感（英文）。
 
 放 `src/client/pure/global-voice.js`，`test/global-voice.test.mjs` 覆盖（含唤醒词与快捷键平台别名用例）。
@@ -401,7 +444,7 @@ v3 新增配置键 `wakeWord`（第 35 个），宿主配置 schema 在插件加
 - `globalHotkeyHelper` 标签改为「系统级全局热键」：说明 Windows PowerShell / macOS+Linux 可选 `uiohook-napi`、macOS 需辅助功能授权、必须同时开浮层、失败静默降级并引导看状态行与 `/diagnostics`。
 - `globalShortcutHint`：跨平台 + macOS `Cmd+Option+V` 别名 + 指向「系统级全局热键」开关。
 - `globalVoiceHint`：开启后**自动开麦进入待机/聆听**（有唤醒词先说唤醒词；留空则直接聆听）、输入框麦克风隐藏、`Alt+V` 切换浮层、后台节流限制。
-- `wakeWordHint`：2 字必须精确匹配 / ≥3 字允许 1 字识别误差 / 留空=关闭 / 只对浮层生效 / 常开麦耗电与隐私提示。
+- `wakeWordHint`：2 字按同音归一后精确匹配 / ≥3 字允许 1 字识别误差 / 支持 `|` 别名 / 留空=关闭 / 只对浮层生效 / 常开麦耗电与隐私提示。
 - `uiControlHint`：14 动作概述 + 浮层前提 + a11y 边界（密码框禁填、外链/文件选择器拒绝、多窗口只第一个响应、危险动作确认）+ 关闭时工具不存在。
 - `uiConfirmHint`：列出全部危险动作（含 a11y 点击/输入）+ 语音允许/拒绝 + 拒绝或超时都不执行。
 

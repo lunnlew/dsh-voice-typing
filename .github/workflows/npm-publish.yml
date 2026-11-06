@@ -20,8 +20,8 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
+        # 这里不再写 version：pnpm 版本只有一个来源 —— package.json 的 `packageManager`
+        # 字段（批次 24，理由见 .github/workflows/ci.yml 同一处注释）。
 
       - name: Use Node.js 22
         uses: actions/setup-node@v4
@@ -32,9 +32,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify client bundle is up to date
-        run: pnpm run check:client
-
+      # 同 ci.yml：`lib/` 已退出版本库，checkout 出来的工作树没有产物，
+      # 「产物与源码同步」那条比对失去对象；`pnpm test` 自己会先构建两端。
       - name: Run tests
         run: pnpm test
 
@@ -47,8 +46,8 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
+        # 这里不再写 version：pnpm 版本只有一个来源 —— package.json 的 `packageManager`
+        # 字段（批次 24，理由见 .github/workflows/ci.yml 同一处注释）。
 
       - name: Use Node.js 22
         uses: actions/setup-node@v4
@@ -59,6 +58,13 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # 批次 23 之前这个 job 一步构建都没有：发布物 `lib/*.js` 是直接跟着 git 进来的。
+      # 产物退出版本库之后必须在这里现生成 —— package.json 的 `prepack` 也会兜一遍
+      # （实测 `npm pack` 与 `npm pack --dry-run` 都会执行 prepack），这里再显式加一步，
+      # 是为了让「发布物里那四个产物是这次流水线建的」在日志里看得见，不靠生命周期隐式生效。
+      - name: Build artifacts
+        run: pnpm run build
 
       - name: Publish to npm
         run: npm publish --access public

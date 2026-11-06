@@ -1,19 +1,26 @@
 /**
- * 朗读切分/发射规则（纯函数）。
+ * 朗读切分/合并规则（纯函数）。
  *
  * 生产现状（0.0.2）：
- *   - 发句节奏由 `lib/read-aloud-scheduler.js` 按**客户端播放进度（ack）**驱动，
+ *   - 发句节奏由 `src/host/read-aloud-scheduler.js` 按**客户端播放进度（ack）**驱动，
  *     旧的「时间窗口每 400ms 取 N 句」只作为**老客户端降级**语义保留；
- *   - 生产者**不再**按 `MAX_PIECES_PER_WINDOW` 分批（scheduler 显式传
- *     `maxPieces: 9999`，一次取全再按 ack 流控补发）；
- *   - `shouldEmit()` 已无生产调用。
+ *   - 生产者**不再**按 `MAX_PIECES_PER_WINDOW` 分批（scheduler 调 `packWindowSentences`
+ *     时显式传 `maxPieces: 9999`，一次取全再按 ack 流控补发）；
+ *   - `shouldEmit()` 已无生产调用（按句子长度决定发不发，不在发射路径上）。
  *
- * 本测试只保护**仍在生产路径上**的规则：
- *   超长句按句末标点切（`splitLongText`）、碎句合并（`packWindowSentences`）、
- *   以及「旧窗口分批语义不被重新接回生产」的保护断言。
+ * 本文件只保护**纯函数层**的规则：超长句按句末标点切（`splitLongText`）、
+ * 碎句合并（`packWindowSentences`）、几个常量的取值范围。
+ *
+ * 批次 6l-f：这里原来还有两条读源码正则的「规则0」——
+ * 钉 `maxPieces: 9999` 那行写法、钉「宿主不调 shouldEmit / MAX_PIECES_PER_WINDOW」。
+ * 它们保护的是**调度器与宿主的接线行为**，已经换成跑真调度器的判据，住在
+ * `test/read-aloud-scheduler.test.mjs`：
+ *   - 「整段一次交给生产者 → 内容一次取全、批数多于一个窗口的分批容量、
+ *     补发只由 ack 推进（窗口设 60 秒，用例期间一次都不到点）」；
+ *   - 「短于 `MIN_SENTENCE_CHARS` 的首句照样开口」（= 长度门槛不在发射路径上）。
+ * 端到端那一层（真 `apply()` + 真 `llm/stream` 钩子 + 真 `/reading-ack` 路由）在
+ * `test/read-aloud-chain.test.mjs`：每段内容完整、段落不跨越、未确认不超过 lead。
  */
-import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import {
   EMIT_WINDOW_MS,
   MIN_SENTENCE_CHARS,
@@ -21,7 +28,7 @@ import {
   MAX_PIECES_PER_WINDOW,
   splitLongText,
   packWindowSentences,
-} from '../lib/read-aloud-policy.js'
+} from '../src/host/read-aloud-policy.js'
 
 let passed = 0
 let failed = 0
@@ -35,27 +42,6 @@ check('时间窗口是正数毫秒', EMIT_WINDOW_MS > 0 && EMIT_WINDOW_MS <= 200
 check('单句上限不超过 80 字', MAX_SENTENCE_CHARS <= 80, String(MAX_SENTENCE_CHARS))
 check('一批最多几句有上限', MAX_PIECES_PER_WINDOW >= 1 && MAX_PIECES_PER_WINDOW <= 4, String(MAX_PIECES_PER_WINDOW))
 check('最短句子长度不超过单句上限', MIN_SENTENCE_CHARS <= MAX_SENTENCE_CHARS)
-
-console.log('\n规则0：旧「窗口分批」语义不能再接回生产（否则本文件的规则 1 才有意义）')
-{
-  const root = fileURLToPath(new URL('..', import.meta.url))
-  const schedulerSrc = fs.readFileSync(root + '/lib/read-aloud-scheduler.js', 'utf8')
-  const indexSrc = fs.readFileSync(root + '/lib/index.js', 'utf8')
-  // 生产唯一调用 packWindowSentences 的地方（scheduler.sentencesOf）显式 maxPieces:9999：
-  // 一次取全，再按客户端 ack 流控逐句补发 —— 不再按窗口分批。
-  check('scheduler 唯一调用方显式 maxPieces: 9999（不再按窗口分批）',
-    (schedulerSrc.match(/packWindowSentences\(/g) || []).length === 1 &&
-    /maxPieces: 9999/.test(schedulerSrc) &&
-    !/MAX_PIECES_PER_WINDOW/.test(schedulerSrc),
-    JSON.stringify({
-      calls: (schedulerSrc.match(/packWindowSentences\(/g) || []).length,
-       has9999: /maxPieces: 9999/.test(schedulerSrc),
-    }))
-  // 宿主不再直接调用旧的发射判定（那些规则已经随窗口发射一起下线）。
-  check('宿主不再调用 shouldEmit / MAX_PIECES_PER_WINDOW',
-    !/shouldEmit\(/.test(indexSrc) && !/MAX_PIECES_PER_WINDOW/.test(indexSrc))
-}
-
 
 console.log('\n规则2：窗口不是「合并成一大段」')
 {

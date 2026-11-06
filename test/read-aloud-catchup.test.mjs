@@ -39,14 +39,15 @@
 import os from 'node:os'
 import path from 'node:path'
 import { mkdir } from 'node:fs/promises'
+import { hostModule } from './helpers/host-source.mjs'
 
 const tmpHome = path.join(os.tmpdir(), `dsh-vt-catchup-${process.pid}`)
 await mkdir(tmpHome, { recursive: true })
 process.env.DSH_HOME = tmpHome
 
 const { apply } = await import('../lib/index.js')
-const { splitParagraphs } = await import('../lib/paragraph.js')
-const { stripForSpeech } = await import('../lib/speech-clean.js')
+const { splitParagraphs } = await hostModule('paragraph')
+const { stripForSpeech } = await hostModule('speech-clean')
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 

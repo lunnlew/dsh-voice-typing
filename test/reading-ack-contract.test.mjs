@@ -271,6 +271,53 @@ console.log('\n5) 缺 turnId：当前实现不校验轮次（客户端拿不到�
 }
 
 // ============================================================
+// 6) 客户端拆批 ↔ 宿主 clamp：两端合起来配额才还得干净
+//    （批次 6f：替掉 read-aloud-stop 里那条扫 ackReading 写法（含
+//     `for (let left = total; left > 0; left -= 64)`）的源码判据）
+// ============================================================
+console.log('\n6) 客户端拆批：一次还 200 条要拆成 4 批，逐批发给真宿主')
+{
+  const { ackBatches, normalizeAckCount, ACK_BATCH_LIMIT } = await import('../src/client/pure/reading-ack.js')
+
+  // 先看拆批本身：形状 + 总和 + 每批都不越界。
+  const shapes = [
+    [1, [1]],
+    [64, [64]],
+    [65, [64, 1]],
+    [200, [64, 64, 64, 8]],
+  ]
+  for (const [total, want] of shapes) {
+    const got = ackBatches(total)
+    check(`count=${total} 拆成 [${want.join(',')}]`,
+      JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got))
+  }
+  for (const total of [1, 7, 64, 65, 200, 999]) {
+    const got = ackBatches(total)
+    const sum = got.reduce((a, b) => a + b, 0)
+    check(`count=${total}：拆出来的批总和正好等于要还的条数，且每批都在 1..${ACK_BATCH_LIMIT}`,
+      sum === total && got.every((n) => n >= 1 && n <= ACK_BATCH_LIMIT),
+      JSON.stringify({ got, sum }))
+  }
+  // 异常值：一律按 1 计（宁可多归还一句，也不能把配额卡住）。
+  check('count 是 0/负数/非数字/NaN 时按 1 计',
+    JSON.stringify(ackBatches(0)) === '[1]' && JSON.stringify(ackBatches(-9)) === '[1]'
+      && JSON.stringify(ackBatches('abc')) === '[1]' && JSON.stringify(ackBatches(NaN)) === '[1]'
+      && normalizeAckCount(Number.POSITIVE_INFINITY) === 1,
+    [ackBatches(0), ackBatches(-9), ackBatches('abc'), ackBatches(NaN)].join(' / '))
+  check('小数按 trunc 收敛（3.7 → 3 批里的 [3]）',
+    JSON.stringify(ackBatches(3.7)) === '[3]', JSON.stringify(ackBatches(3.7)))
+
+  // 再把拆出来的批**真发给真宿主**：累计 acks 必须正好 +200。
+  // 这条是两端契约的落点：如果客户端偷懒发一条 count=200，第 3 节已经证明宿主只认 64，
+  // 剩下 136 条永远还不回去（朗读越来越慢直到停住）。
+  const before = (await sessionState())?.acks ?? 0
+  for (const n of ackBatches(200)) await postAck(host, { sessionId: SID, turnId, count: n })
+  const after = (await sessionState())?.acks ?? 0
+  check('逐批回执 4 条之后，宿主累计正好 +200（一条 count=200 会被 clamp 成 64）',
+    after - before === 200, JSON.stringify({ before, after, delta: after - before }))
+}
+
+// ============================================================
 // 摘要
 // ============================================================
 console.log(`\n通过 ${passed}，失败 ${failures.length}`)

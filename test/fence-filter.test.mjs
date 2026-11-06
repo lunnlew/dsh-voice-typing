@@ -13,7 +13,7 @@
  *
  * 运行：node test/fence-filter.test.mjs
  */
-import { createFenceFilter } from '../lib/fence-filter.js'
+import { createFenceFilter } from '../src/host/fence-filter.js'
 
 let pass = 0
 let fail = 0

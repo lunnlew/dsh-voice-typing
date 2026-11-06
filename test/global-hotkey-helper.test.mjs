@@ -18,7 +18,10 @@ import {
   createHotkeyHelper,
   helperSupported,
   parseAccelerator,
-} from '../lib/global-hotkey-helper.js'
+  recognizedModifierSpellings,
+} from '../src/host/global-hotkey-helper.js'
+import { keyModifierSpellings } from '../src/shared/key-modifiers.js'
+import { HOTKEY_REASONS, HOTKEY_REASON_VALUES, isHotkeyReason } from '../src/shared/hotkey-reasons.js'
 
 let passed = 0
 const failures = []
@@ -30,6 +33,30 @@ function check(name, ok, detail) {
     failures.push({ name, detail })
     console.log('  FAIL ' + name + (detail ? ' :: ' + detail : ''))
   }
+}
+
+/**
+ * 「reason 是码、原文在 detail」这条契约的形状判据（批次 19，§8.61）。
+ *
+ * 为什么要它：helper 的 reason 会被设置面板插进界面文案。
+ * 一旦某处又写成中文句子，英文界面就跟着变中文 —— 判据要在合入前就红，
+ * 而不是等装机时人眼去看界面。
+ *
+ * 通过条件：detail 是字符串；reason 是词表里的码或空串（成功/进行中才是空串）；
+ * reason 不含非 ASCII 字符（中文句子一定含，码一定不含）。
+ * 认识的码顺手记进集合，末尾那条判据要求「词表里每个码都被驱动过」。
+ *
+ * @param {{reason:string, detail?:string}} state - helper.sync()/state() 的结果。
+ * @returns {boolean}
+ */
+const seenReasonCodes = new Set()
+function reasonShapeOk(state) {
+  if (typeof state.detail !== 'string') return false
+  if (/[^\x00-\x7F]/.test(String(state.reason))) return false
+  if (state.reason === '') return true
+  if (!isHotkeyReason(state.reason)) return false
+  seenReasonCodes.add(state.reason)
+  return true
 }
 
 /**
@@ -139,6 +166,43 @@ console.log('\n== 2. 加速键解析 ==')
   check('keyName：Ctrl+ArrowUp → ArrowUp', parseAccelerator('Ctrl+ArrowUp').keyName === 'ArrowUp')
 }
 
+console.log('\n== 2b. 修饰键写法与 shared 那张表同源（第 4 步 4.3c）==')
+{
+  // 这里问的不是「某个写法认不认」，而是**两条链路认的是不是同一批字**。
+  // 窗口内匹配（pure/shortcut.js）问 `canonicalModifier`，系统级热键问本模块的位掩码表。
+  // 两份名单各列一遍时，加一个写法只改一端的后果是「窗口里按得出、切到别的应用按不动」，
+  // 而两处代码看起来都没错 —— 这正是 4.3b 那类静默失效的第三条链路。
+  const recognized = [...recognizedModifierSpellings()].sort().join(',')
+  const shared = [...keyModifierSpellings()].map((spelling) => spelling.toLowerCase()).sort().join(',')
+  check('helper 认下的写法 = shared 的全部写法', recognized === shared,
+    `helper=[${recognized}] / shared=[${shared}]`)
+  check('规范名本身也在名单里（ctrl/alt/shift/meta）',
+    ['ctrl', 'alt', 'shift', 'meta'].every((name) => recognizedModifierSpellings().includes(name)))
+  // 下面这条不是修 bug：4.3c 之前 helper 自带的那份手抄写法表和 shared 内容完全一致
+  // （11 条一字不差），今天没有用户被坑。它钉的是「以后别分叉」——
+  // 往 shared 加一种写法而忘了动这张表的那一刻，这条断言就是唯一会发现它的地方。
+  const control = parseAccelerator('Control+Alt+V')
+  check('Control 与 Ctrl 解析成同一组位（漏写法时这里直接判非法）',
+    control.ok === true && control.modifiers === parseAccelerator('Ctrl+Alt+V').modifiers,
+    JSON.stringify(control))
+  // 单字母/数字主键要配「强修饰键」：那份名单也在 shared，helper 只负责查位。
+  const shiftV = parseAccelerator('Shift+V')
+  check('Shift 不是强修饰键：Shift+V 仍然非法', shiftV.ok === false, JSON.stringify(shiftV))
+  check('Control+V 合法（别名落到 ctrl 位）', parseAccelerator('Control+V').ok === true)
+  check('不认识的写法仍然非法（照 shared 派生，不等于全都放行）',
+    parseAccelerator('Hyper+V').ok === false)
+
+  // 位本身：user32 RegisterHotKey 的 fsModifiers 是固定值，挪一位就会
+  // 把「Alt+V」注册成「Ctrl+V」这种按了没反应的组合（且和别的软件撞车）。
+  const bitsOf = (name) => parseAccelerator(`${name}+Space`).modifiers & 0x000f
+  check('alt/ctrl/shift/meta 各占自己那一元（0x1/0x2/0x4/0x8）',
+    bitsOf('alt') === 0x0001 && bitsOf('ctrl') === 0x0002
+    && bitsOf('shift') === 0x0004 && bitsOf('meta') === 0x0008,
+    `alt=${bitsOf('alt')} ctrl=${bitsOf('ctrl')} shift=${bitsOf('shift')} meta=${bitsOf('meta')}`)
+  check('四个修饰键的位互不相同（撞位会让两个配置注册成同一个热键）',
+    new Set(['alt', 'ctrl', 'shift', 'meta'].map(bitsOf)).size === 4)
+}
+
 console.log('\n== 3. 脚本生成 ==')
 {
   const script = buildHelperScript({ port: 45678, token: 'a'.repeat(32), accelerator: 'Ctrl+Alt+V' })
@@ -208,17 +272,23 @@ console.log('\n== 4. 生命周期（假 spawn）：starting → READY → enable
 
   // 浮层没开（globalVoice=false）时注册系统热键没有消费者，必须一起停掉。
   const overlayOff = helper.sync({ globalHotkeyHelper: true, globalVoice: false, globalShortcut: 'Ctrl+Alt+V' }, 45678)
-  check('浮层关闭 → 不拉起并说明原因',
-    overlayOff.enabled === false && /浮层|globalVoice/.test(overlayOff.reason) && spawned.length === 0,
+  check('浮层关闭 → 不拉起并报出码',
+    overlayOff.enabled === false && overlayOff.reason === HOTKEY_REASONS.NO_GLOBAL_VOICE
+      && reasonShapeOk(overlayOff) && spawned.length === 0,
     JSON.stringify(overlayOff))
 
   const bad = helper.sync({ globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'V' }, 45678)
-  check('快捷键非法 → 不拉起并给出原因', bad.enabled === false && /非法/.test(bad.reason) && spawned.length === 0, JSON.stringify(bad))
+  check('快捷键非法 → 不拉起并报出码',
+    bad.enabled === false && bad.reason === HOTKEY_REASONS.INVALID_SHORTCUT && reasonShapeOk(bad) && spawned.length === 0,
+    JSON.stringify(bad))
+  // 非法的具体哪一条（缺修饰键 / 没有主键…）留在 detail：诊断看，界面不出。
+  check('非法快捷键的原文进 detail 而不是 reason',
+    bad.detail.includes('修饰键') && !bad.reason.includes('修饰键'), JSON.stringify(bad))
 
   const starting = helper.sync({ globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Ctrl+Alt+V' }, 45678)
   check('合法配置 → 拉起一次，但先进入 starting（不谎报 enabled）',
     starting.enabled === false && starting.status === 'starting' && spawned.length === 1
-      && /等待/.test(starting.reason), JSON.stringify(starting))
+      && starting.reason === '' && reasonShapeOk(starting), JSON.stringify(starting))
   check('spawn 以 stdout/stderr 管道接 READY / REGISTER_FAILED',
     JSON.stringify(spawned[0].options?.stdio) === JSON.stringify(['ignore', 'pipe', 'pipe']),
     JSON.stringify(spawned[0].options?.stdio))
@@ -237,7 +307,8 @@ console.log('\n== 4. 生命周期（假 spawn）：starting → READY → enable
   emitReady(children[0])
   const on = helper.state()
   check('收到 READY → enabled=true（RegisterHotKey 确认成功）',
-    on.enabled === true && on.status === 'enabled' && /已启动/.test(on.reason), JSON.stringify(on))
+    on.enabled === true && on.status === 'enabled' && on.reason === ''
+      && on.detail.includes('pid=') && reasonShapeOk(on), JSON.stringify(on))
 
   const again = helper.sync({ globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Ctrl+Alt+V' }, 45678)
   check('同配置重复 sync 不重启', again.enabled === true && spawned.length === 1, JSON.stringify(again))
@@ -266,7 +337,9 @@ console.log('\n== 4. 生命周期（假 spawn）：starting → READY → enable
   const liveScript = spawned[2].args[spawned[2].args.length - 1]
   children[2].emit('exit', 0)
   const afterExit = helper.state()
-  check('子进程退出后状态回到未启用', afterExit.enabled === false && /退出/.test(afterExit.reason), JSON.stringify(afterExit))
+  check('子进程退出后状态回到未启用',
+    afterExit.enabled === false && afterExit.reason === HOTKEY_REASONS.EXITED
+      && afterExit.detail.includes('code=0') && reasonShapeOk(afterExit), JSON.stringify(afterExit))
   // 正常退出也要删临时脚本（含 token 的 .ps1 不能留在 %TEMP%）。
   check('子进程正常退出时删除临时脚本', !fs.existsSync(liveScript), liveScript)
 
@@ -309,8 +382,9 @@ console.log('\n== 4b. spawn 异步失败（error 事件）不能打死进程 =='
   }
   check('spawn error 不会抛未捕获异常', threw === false)
   const after = helper.state()
-  check('spawn error 后状态回未启用且带原因',
-    after.enabled === false && /启动失败/.test(after.reason), JSON.stringify(after))
+  check('spawn error 后状态回未启用且报出码',
+    after.enabled === false && after.reason === HOTKEY_REASONS.START_FAILED
+      && after.detail.includes('ENOENT') && reasonShapeOk(after), JSON.stringify(after))
   check('spawn error 后临时脚本被清理',
     fs.readdirSync(tmpDir).filter((name) => name.endsWith('.ps1')).length === 0)
   helper.dispose()
@@ -336,8 +410,9 @@ console.log('\n== 4c. 注册失败 / 提前退出 → failed，且清临时脚�
   check('注册阶段不谎报 enabled', helper.state().enabled === false)
   children[0].stderr.emit('data', Buffer.from('REGISTER_FAILED\n'))
   const failed = helper.state()
-  check('REGISTER_FAILED → failed 且 reason 说明注册失败',
-    failed.enabled === false && failed.status === 'failed' && /注册失败/.test(failed.reason), JSON.stringify(failed))
+  check('REGISTER_FAILED → failed 且报出码',
+    failed.enabled === false && failed.status === 'failed' && failed.reason === HOTKEY_REASONS.REGISTER_FAILED
+      && reasonShapeOk(failed), JSON.stringify(failed))
   check('REGISTER_FAILED 后子进程被回收', children[0].killed === true)
   check('REGISTER_FAILED 后临时脚本被清理',
     fs.readdirSync(tmpDir).filter((name) => name.endsWith('.ps1')).length === 0)
@@ -361,8 +436,10 @@ console.log('\n== 4c. 注册失败 / 提前退出 → failed，且清临时脚�
   helper.sync({ globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Ctrl+Alt+V' }, 45678)
   children[0].emit('exit', 1)
   const failed = helper.state()
-  check('未 READY 就退出 → failed（reason 带 code）',
-    failed.enabled === false && failed.status === 'failed' && /启动失败/.test(failed.reason) && /code=1/.test(failed.reason),
+  check('未 READY 就退出 → failed（码 + detail 带 code）',
+    failed.enabled === false && failed.status === 'failed'
+      && failed.reason === HOTKEY_REASONS.EXITED_BEFORE_READY
+      && failed.detail.includes('code=1') && reasonShapeOk(failed),
     JSON.stringify(failed))
   check('提前退出后临时脚本被清理',
     fs.readdirSync(tmpDir).filter((name) => name.endsWith('.ps1')).length === 0)
@@ -383,11 +460,13 @@ console.log('\n== 5. 非 Windows：native 模块缺失/加载失败 → 安静�
     spawnImpl: () => { spawned.push(1); throw new Error('should not spawn') },
   })
   const loading = helper.sync({ globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Ctrl+Alt+V' }, 45678)
-  check('native 加载中不谎报 enabled', loading.enabled === false && /加载/.test(loading.reason), JSON.stringify(loading))
+  check('native 加载中不谎报 enabled（进行中不占码位）',
+    loading.enabled === false && loading.reason === '' && reasonShapeOk(loading), JSON.stringify(loading))
   await tick()
   const failed = helper.state()
-  check('模块缺失 → 降级为 failed 并给出原因',
-    failed.enabled === false && /原生热键不可用|uiohook/.test(failed.reason), JSON.stringify(failed))
+  check('模块缺失 → 降级为 failed 并报出码',
+    failed.enabled === false && failed.reason === HOTKEY_REASONS.NATIVE_UNAVAILABLE
+      && failed.detail.includes('uiohook-napi') && reasonShapeOk(failed), JSON.stringify(failed))
   check('native 路径不拉起 PowerShell', spawned.length === 0)
   helper.dispose()
 }
@@ -405,11 +484,12 @@ console.log('\n== 6. 非 Windows：uiohook-napi native 适配器（假模块）=
   })
 
   const loading = helper.sync({ globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Ctrl+Alt+V' }, 0)
-  check('加载完成前 enabled=false（不谎报）', loading.enabled === false && /加载/.test(loading.reason), JSON.stringify(loading))
+  check('加载完成前 enabled=false（不谎报）',
+    loading.enabled === false && loading.reason === '' && reasonShapeOk(loading), JSON.stringify(loading))
   await tick()
   const on = helper.state()
-  check('加载完成 → enabled=true 且 reason 标 native',
-    on.enabled === true && /native/.test(on.reason) && loadCalls === 1, JSON.stringify(on))
+  check('加载完成 → enabled=true 且 detail 标 native',
+    on.enabled === true && on.reason === '' && on.detail.includes('native') && loadCalls === 1, JSON.stringify(on))
   check('注册了 keydown 并 start 一次', fake.handlers.has('keydown') && fake.uIOhook.starts === 1)
 
   fake.emitKeydown({ keycode: fake.UiohookKey.V, ctrlKey: true, altKey: true, shiftKey: false, metaKey: false })
@@ -465,7 +545,9 @@ console.log('\n== 7. native 加载失败可重试 & 配置闸门 ==')
   })
   helper.sync({ globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Ctrl+Alt+V' }, 0)
   await tick()
-  check('第一次失败 → failed 原因可见', helper.state().enabled === false && /permission denied/.test(helper.state().reason))
+  check('第一次失败 → failed 且原始报错留在 detail',
+    helper.state().enabled === false && helper.state().reason === HOTKEY_REASONS.NATIVE_UNAVAILABLE
+      && helper.state().detail.includes('permission denied') && reasonShapeOk(helper.state()))
   helper.sync({ globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Ctrl+Alt+V' }, 0)
   await tick()
   check('再次 sync 可重试成功', helper.state().enabled === true && attempts === 2, JSON.stringify(helper.state()))
@@ -484,8 +566,12 @@ console.log('\n== 7. native 加载失败可重试 & 配置闸门 ==')
   const badShortcut = helper.sync({ globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Shift+V' }, 0)
   check('helper 关 / 浮层关 / Shift+V → 都不加载',
     loads === 0 && offByHelper.enabled === false && offByVoice.enabled === false && badShortcut.enabled === false)
-  check('浮层关闭的 reason 说明原因', /浮层|globalVoice/.test(offByVoice.reason), offByVoice.reason)
-  check('Shift+V 被拒（单字母需 Ctrl/Alt/Win）', /Shift|Ctrl/.test(badShortcut.reason), badShortcut.reason)
+  check('浮层关闭报出的码是 no-global-voice',
+    offByVoice.reason === HOTKEY_REASONS.NO_GLOBAL_VOICE && reasonShapeOk(offByVoice), offByVoice.reason)
+  check('Shift+V 被拒（单字母需 Ctrl/Alt/Win）并报 invalid-shortcut',
+    badShortcut.reason === HOTKEY_REASONS.INVALID_SHORTCUT && reasonShapeOk(badShortcut), badShortcut.detail)
+  check('helper 关闭报 disabled-by-switch',
+    offByHelper.reason === HOTKEY_REASONS.DISABLED_BY_SWITCH && reasonShapeOk(offByHelper), offByHelper.reason)
   helper.dispose()
   check('闸门场景没有注册任何 hook', !fake.handlers.has('keydown'))
 }
@@ -500,7 +586,11 @@ console.log('\n== 7. native 加载失败可重试 & 配置闸门 ==')
   await tick()
   const state = helper.state()
   check('模块接口不完整 → failed 且不抛异常',
-    state.enabled === false && /原生热键不可用/.test(state.reason), JSON.stringify(state))
+    state.enabled === false && state.reason === HOTKEY_REASONS.NATIVE_UNAVAILABLE
+      && state.detail.length > 0 && reasonShapeOk(state), JSON.stringify(state))
+  // detail 必须把「到底是哪种不可用」留住：这条是接口不完整，不是缺依赖。
+  check('接口不完整的原文（缺哪个成员/键名）进 detail',
+    state.detail.includes('UiohookKey') || state.detail.includes('不支持按键'), state.detail)
   helper.dispose()
 }
 
@@ -516,8 +606,9 @@ console.log('\n== 8. 默认 native 加载器闸门：无显示/显式禁用时�
     headless.sync({ globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Ctrl+Alt+V' }, 0)
     await tick()
     const headlessState = headless.state()
-    check('Linux 无 DISPLAY → failed 且原因说明没有显示服务器',
-      headlessState.enabled === false && /DISPLAY|显示/.test(headlessState.reason), JSON.stringify(headlessState))
+    check('Linux 无 DISPLAY → failed 并报 native-unavailable（哪种不可用留在 detail）',
+      headlessState.enabled === false && headlessState.reason === HOTKEY_REASONS.NATIVE_UNAVAILABLE
+        && headlessState.detail.includes('DISPLAY') && reasonShapeOk(headlessState), JSON.stringify(headlessState))
     headless.dispose()
 
     // 显式禁用：任何平台都不 import。
@@ -526,8 +617,10 @@ console.log('\n== 8. 默认 native 加载器闸门：无显示/显式禁用时�
     disabled.sync({ globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Ctrl+Alt+V' }, 0)
     await tick()
     const disabledState = disabled.state()
-    check('显式禁用 → failed 且原因说明被禁用',
-      disabledState.enabled === false && /禁用/.test(disabledState.reason), JSON.stringify(disabledState))
+    check('显式禁用 → failed 并报 native-unavailable（禁用来源留在 detail）',
+      disabledState.enabled === false && disabledState.reason === HOTKEY_REASONS.NATIVE_UNAVAILABLE
+        && disabledState.detail.includes('DSH_VOICE_TYPING_DISABLE_NATIVE_HOOK')
+        && reasonShapeOk(disabledState), JSON.stringify(disabledState))
     disabled.dispose()
 
     // 注入的 fake loader 不受闸门影响：仍能走完整 native 流程。
@@ -547,6 +640,126 @@ console.log('\n== 8. 默认 native 加载器闸门：无显示/显式禁用时�
     if (oldDisable === undefined) delete process.env.DSH_VOICE_TYPING_DISABLE_NATIVE_HOOK
     else process.env.DSH_VOICE_TYPING_DISABLE_NATIVE_HOOK = oldDisable
   }
+}
+
+console.log('\n== 9. 原因码词表完备性：十三个码每个都被驱动出来（批次 19）==')
+{
+  // 为什么要这一节：词表里躺着十三个码，宿主只报码、界面那句话由客户端按码出。
+  // 「码表写好了但某条路永远走不到那个码」和「走了一个词表外的值」都不会让任何
+  // 单条判据红 —— 只有把十三个码挨个驱动一遍才看得出来。
+  // 这一节驱动的是真 helper（假 spawn / 假 loader），不是它生成的文本。
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-voice-hotkey-codes-'))
+  let seq = 0
+  const onConfig = { globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Ctrl+Alt+V' }
+
+  /** 造一个 Windows 路径的 helper（各项注入都有能触发目标失败的默认值）。 */
+  function winHelper({ spawnImpl, createToken, tmpDir } = {}) {
+    seq += 1
+    return createHotkeyHelper({
+      platform: 'win32',
+      tmpDir: tmpDir ?? tmpRoot,
+      log: () => {},
+      createToken: createToken ?? (() => 'c'.repeat(24) + String(seq)),
+      spawnImpl: spawnImpl ?? (() => makeFakeChild(4100 + seq)),
+    })
+  }
+
+  /** 报出目标码并顺手做形状判据（reason 只能是词表内的码、原文只能是 detail）。 */
+  function report(label, expected, state) {
+    check(`${label} → ${expected}`,
+      state.reason === expected && reasonShapeOk(state), JSON.stringify(state))
+  }
+
+  report('设置里关掉系统级热键', HOTKEY_REASONS.DISABLED_BY_SWITCH,
+    winHelper().sync({ ...onConfig, globalHotkeyHelper: false }, 45678))
+  report('浮层没开', HOTKEY_REASONS.NO_GLOBAL_VOICE,
+    winHelper().sync({ ...onConfig, globalVoice: false }, 45678))
+  report('快捷键不合法', HOTKEY_REASONS.INVALID_SHORTCUT,
+    winHelper().sync({ ...onConfig, globalShortcut: 'V' }, 45678))
+
+  const addressHelper = winHelper()
+  report('回调地址定不下来（origin 非法且端口不可用）', HOTKEY_REASONS.HOST_ADDRESS_UNKNOWN,
+    addressHelper.sync(onConfig, 0))
+
+  // token 太短 → 生成脚本的函数自己抛错（脚本还没落盘）。
+  report('脚本没生成出来', HOTKEY_REASONS.SCRIPT_BUILD_FAILED,
+    winHelper({ createToken: () => 'short' }).sync(onConfig, 45678))
+  // 临时目录不存在 → 写脚本落不了盘。
+  report('脚本写不到磁盘', HOTKEY_REASONS.SCRIPT_WRITE_FAILED,
+    winHelper({ tmpDir: path.join(tmpRoot, 'this-dir-does-not-exist') }).sync(onConfig, 45678))
+  // spawn 当场抛（不是异步 error 事件）。
+  report('spawn 当场抛错', HOTKEY_REASONS.SPAWN_FAILED,
+    winHelper({ spawnImpl: () => { throw new Error('spawn 被组策略拒绝') } }).sync(onConfig, 45678))
+
+  // 进程起来了但异步报错（powershell.exe 不存在 / ENOENT）。
+  const errChild = makeFakeChild(4201)
+  report('进程起来后报 error', HOTKEY_REASONS.START_FAILED,
+    (() => {
+      const helper = winHelper({ spawnImpl: () => errChild })
+      helper.sync(onConfig, 45678)
+      errChild.emit('error', new Error('spawn powershell.exe ENOENT'))
+      return helper.state()
+    })())
+
+  // 起来了、也跑到了 RegisterHotKey，但注册返回 false。
+  const regChild = makeFakeChild(4202)
+  report('RegisterHotKey 返回 false', HOTKEY_REASONS.REGISTER_FAILED,
+    (() => {
+      const helper = winHelper({ spawnImpl: () => regChild })
+      helper.sync(onConfig, 45678)
+      regChild.stderr.emit('data', Buffer.from('REGISTER_FAILED\n'))
+      return helper.state()
+    })())
+
+  // 没打印 READY 就退了（脚本崩了 / 被安全软件秒杀）。
+  const earlyChild = makeFakeChild(4203)
+  report('未确认注册就退出', HOTKEY_REASONS.EXITED_BEFORE_READY,
+    (() => {
+      const helper = winHelper({ spawnImpl: () => earlyChild })
+      helper.sync(onConfig, 45678)
+      earlyChild.emit('exit', 1)
+      return helper.state()
+    })())
+
+  // 注册成功过，之后进程退了。
+  const liveChild = makeFakeChild(4204)
+  report('启用后进程退出', HOTKEY_REASONS.EXITED,
+    (() => {
+      const helper = winHelper({ spawnImpl: () => liveChild })
+      helper.sync(onConfig, 45678)
+      emitReady(liveChild)
+      liveChild.emit('exit', 0)
+      return helper.state()
+    })())
+
+  // native（macOS/Linux）这条路：加载器拒绝 → 一个码概括，具体哪种看 detail。
+  const nativeHelper = createHotkeyHelper({
+    platform: 'linux',
+    onTrigger: () => {},
+    loadNative: async () => { throw new Error('原生模块没编好') },
+  })
+  nativeHelper.sync(onConfig, 0)
+  await tick()
+  report('原生热键模块不可用', HOTKEY_REASONS.NATIVE_UNAVAILABLE, nativeHelper.state())
+  nativeHelper.dispose()
+
+  // 插件停止：注册已释放。
+  const disposedHelper = winHelper()
+  disposedHelper.sync(onConfig, 45678)
+  disposedHelper.dispose()
+  report('卸载/dispose', HOTKEY_REASONS.UNLOADED, disposedHelper.state())
+
+  // 十三码是否都被驱动过（漏一个 = 那条路在装机上没人验证过它的文案）。
+  const missingCodes = HOTKEY_REASON_VALUES.filter((code) => !seenReasonCodes.has(code))
+  check('词表里每个码都被真跑驱动过',
+    missingCodes.length === 0 && seenReasonCodes.size === HOTKEY_REASON_VALUES.length,
+    `缺：${missingCodes.join(', ') || '（无）'}；已驱动 ${seenReasonCodes.size}/${HOTKEY_REASON_VALUES.length}`)
+  // 界面上会出现的只有码：整轮观察到的 reason 里没有一个是词表外的值。
+  check('跑过的每个 reason 都在词表内（形状判据已按条拦）',
+    [...seenReasonCodes].every((code) => HOTKEY_REASON_VALUES.includes(code)),
+    [...seenReasonCodes].join(', '))
+
+  try { fs.rmSync(tmpRoot, { recursive: true, force: true }) } catch { /* 清理失败不影响断言 */ }
 }
 
 if (failures.length > 0) {

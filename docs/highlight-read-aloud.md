@@ -8,6 +8,60 @@
 > ✅ **已实现**（见文末「实现落地」）：采用方案 A（逐句高亮）+ 方案 C
 > 兜底（跨块时整段高亮），用**覆盖层**实现，不碰消息 DOM、不影响消息流。
 
+> ## 口径修正（2026-11-06 复核）
+>
+> 这份报告的**核心判断没有变**：事件里带的是清洗后的纯文本、显示的是 Markdown 渲染结果，
+> 两者对不齐，所以用「按纯文本子串匹配 + 覆盖层画矩形」这条路。方案 A/C 的取舍、
+> 为什么不碰消息 DOM、为什么必须逐句重算矩形，今天读仍然成立。
+> 需要更正的是**位置、行号与两条实现细节**。
+>
+> **1. 位置与行号。** 文中 `lib/xxx.js` 的宿主手写代码今天都在 `src/host/xxx.js`
+> （`lib/` 只剩四份构建产物、且不进版本库）。逐条对应：
+> - §1.1 与 §7 写的「宿主 `lib/index.js` 广播 `sentence`」—— 句子的实际发出点在
+>   `src/host/read-aloud-scheduler.js:418`，`src/host/index.js` 只挂 `llm/stream` 钩子。
+> - `stripForSpeech` 在 `src/host/speech-clean.js`，`turnId` 分配在 `src/host/turn-model.js`，
+>   切句规则在 `src/host/read-aloud-policy.js`。
+> - §7 里三条 `src/client/main.js` 行号全部失效：那个文件现在 **627 行**，
+>   朗读链路整个住在 `src/client/dom/mic-button.js` ——
+>   `pumpQueue` 在 `:1063`，播放点上的 `readingHighlight.set(sentence)` 在 `:1344`，
+>   `haltSpeaking` 在 `:432`，高亮控制器的建立在 `:489`。
+>   覆盖层本体在 `src/client/pure/reading-highlight.js`，对齐算法在 `src/client/pure/highlight.js`。
+>
+> **2. 「400ms 时间窗口每批广播 1 句」已经不是主路径。** §1.1 第 3 行是早期实现。
+> 现在的节奏是**按客户端 ack 流控**（客户端每开始播一句回 `/reading-ack`，宿主才补发下一句）；
+> `EMIT_WINDOW_MS = 400` 只剩一个用途：收不到 ack 的老客户端 / ack 丢失时的降级节奏。
+> 这一条对本主题有影响 —— 高亮的推进节奏现在等于真实播放节奏，不再受发包窗口影响。
+>
+> **3. §5 的两处假设被 §8 的实现否掉了，但原文没回改**，读的时候按 §8 与代码为准：
+> 容器不是「取第一个命中的选择器」，而是在四个候选里取**最短**的那个（避免整页容器）；
+> 实际样式是属性选择器 `[data-voice-reading]` + `rgba(255,214,0,.32)`
+> （`src/client/pure/reading-highlight.js:81`），不是文中设想的 `.dsh-voice-reading` class。
+>
+> **4. 补三条 §8 也没写的现实现判据**（都是装机反馈改出来的，别再当"没做的事"）：
+> 覆盖层 `z-index` 取 **900** —— 原来是整型最大值，会画到设置弹框上面，
+> 而 DSH 的弹框/遮罩是 1000 级；样式注入时还会把已存在的旧值改写掉。
+> 检测到 `[aria-modal="true"] / [role="dialog"] / [role="alertdialog"]` 时**整层隐藏**
+> （`MutationObserver` 盯着挂载/卸载，关掉弹框自动重画）。
+> 每个色块**裁剪到「会话滚动视口 ∩ 窗口 ∩ 底部输入区以上」** ——
+> 消息滚出视口后 `Range` 仍报原位置，不裁剪就会画到输入框和顶栏上面。
+> 三条都由 `test/highlight-overlay.test.mjs` 判。
+>
+> **5. 构建与测试口径**（§8「验证」那段）：`node scripts/bundle-client.mjs` 这个脚本已不存在，
+> 现在是 `pnpm run build:client`（esbuild 沿 import 图合成），`@bundle` 标记退役，
+> 参与合并的纯文件是 `src/client/pure/` 下那 **24** 个，不是「5 个」。
+> `node --check lib/client.js` 照旧可用。
+> 「26 bundle-sync + 32 highlight」是当天的条数：highlight 那一份今天仍是 32 条断言，
+> `bundle-sync` 早已远多于 26 条，具体数以运行输出为准。
+>
+> **6. 仍然成立的一条**：§8 末尾说「心跳 `voice-session` 里带上高亮诊断字段，
+> 便于从宿主 `/diagnostics` 排查」—— 今天照旧带着（`dom/mic-button.js:2201`），
+> 而且字段比当时多了 `modalOpen` / `clipped` / `skippedRects`。
+> 不用等心跳的话，渲染器里直接 `__DSH_VOICE_DEBUG__().readingHighlight` 更快（`:732`）。
+>
+> **无法复核的部分**：§2 那些 `app.asar` / `dsh-client-ui-chat/lib/client.js` 的取证
+> 来自本机 DSH 桌面端某个版本的只读反编译，宿主不随本仓库发布。
+> 「稳定的 DOM 锚点」（§2.3）这一条尤其依赖宿主结构，换版本请重核。
+
 ---
 
 ## 1. 现状：朗读是怎么发生的

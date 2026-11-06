@@ -25,12 +25,22 @@
  *   - 生成很快时 skim：仍在流式生成且「还没发出去的内容（backlogMs）」超预算时，
  *     正在读的段**只读首句**就跳走；生成结束后的剩余段落完整读完；
  *   - SSE 重连（resetOutstanding）释放旧连接的未确认配额。
+ *
+ * 批次 6l-f 从 `test/read-aloud-policy.test.mjs` 搬来的两条（原来读源码正则，现在跑真调度器）：
+ *   - 「生产者不按时间窗口分批」= 一段多句一次取全、补发只由 ack 推进（窗口设 60 秒，
+ *     期间一次都不到点，剩下的内容仍能发完）；
+ *   - 「按句子长度决定的发射判定不在生产路径上」= 短于 `MIN_SENTENCE_CHARS` 的首句照样开口。
  */
 import {
   createReadAloudScheduler,
   READ_ALOUD_LEAD,
-} from '../lib/read-aloud-scheduler.js'
-import { stripForSpeech } from '../lib/speech-clean.js'
+} from '../src/host/read-aloud-scheduler.js'
+import { stripForSpeech } from '../src/host/speech-clean.js'
+import {
+  MIN_SENTENCE_CHARS,
+  MAX_SENTENCE_CHARS,
+  MAX_PIECES_PER_WINDOW,
+} from '../src/host/read-aloud-policy.js'
 
 let passed = 0
 let failed = 0
@@ -721,5 +731,83 @@ console.log('\n追赶计时：客户端上报真实音频时长时优先使用�
     JSON.stringify(diag))
   reader.end()
 }
+
+console.log('\n一次取全：整段一次交给生产者，发句节奏由 ack 决定（不按时间窗口分批）')
+{
+  // 判的是「生产者不按窗口分批」这条语义，靠跑真调度器观察，不读源码。
+  // 生产写法在 src/host/read-aloud-scheduler.js 的 sentencesOf()：调
+  // packWindowSentences 时显式传 maxPieces: 9999 —— 一次把整段取全，
+  // 之后按客户端播放进度逐句补发。
+  // 旧的窗口语义是「一个 EMIT_WINDOW_MS 最多取 MAX_PIECES_PER_WINDOW(=1) 批」，
+  // 接回来的话整段只剩第一个片段、其余内容在 return 的 rest 里被丢掉（实测见文档 6l-f）。
+  // 窗口设 60 秒：本用例期间时间窗口一次都不会到点，
+  // 所以「后面的片段发出来了」只能是被 ack 发出来的。
+  const SENTENCES = Array.from(
+    { length: 24 },
+    (_, i) => `第${i + 1}句话要把这一段凑得比未确认上限更长一些。`,
+  )
+  const full = SENTENCES.join('')
+  const { scheduler, events } = makeScheduler({ windowMs: 60000 })
+  const reader = scheduler.reader('s26', 'turn-1')
+  const textsOf = () => events.map((event) => event.text).join('')
+  // 空行 = 段落边界：整段一次交给生产者（一次拿到多句才能看出「一批取几句」的限制）。
+  reader.push(`${full}\n\n`)
+  check('窗口没到点也已经开口（首句无条件立刻发）',
+    events.length === 1, '已发 ' + events.length)
+  check('整段没有一次全倒给客户端（未确认配额之外都等着）',
+    textsOf().length < full.length, `${textsOf().length}/${full.length} 字`)
+
+  // 一句一句 ack 到整段发完，全程不给时间窗口任何到点机会。
+  let acked = 0
+  for (let guard = 0; guard < 60 && textsOf().length < full.length; guard += 1) {
+    const before = textsOf().length
+    scheduler.ack({ sessionId: 's26', turnId: 'turn-1', count: 1 })
+    acked += 1
+    // 流控不变量：ack 一句只补一句，绝不冲过未确认上限。
+    check('未确认句数不超过 lead（每次 ack 后）',
+      events.length - acked <= READ_ALOUD_LEAD,
+      `已发 ${events.length}、已确认 ${acked}`)
+    // ack 不再推进 = 要发的内容根本不在队列里，别空转。
+    if (textsOf().length === before) break
+  }
+  const texts = events.map((event) => event.text)
+  check('整段内容一次取全、全部发出（旧分批语义只剩第一个片段）',
+    texts.join('') === full,
+    `发出 ${texts.length} 批 / ${texts.join('').length} 字，整段 ${full.length} 字：${texts.join('|').slice(0, 90)}`)
+  check(`发出的批数多于一个窗口的分批容量（> ${MAX_PIECES_PER_WINDOW}）`,
+    texts.length > MAX_PIECES_PER_WINDOW, String(texts.length))
+  check(`每批仍不超过单句上限（<= ${MAX_SENTENCE_CHARS} 字）`,
+    texts.every((text) => text.length <= MAX_SENTENCE_CHARS),
+    '最长 ' + Math.max(...texts.map((text) => text.length)))
+  check('发句已切到流控模式（ack 驱动）',
+    scheduler.diagnostics()[0]?.mode === 'flow',
+    JSON.stringify(scheduler.diagnostics()[0]?.mode))
+  const order = checkOrderAndNoLoss(events, full)
+  check('不丢、不重复、不乱序', order.ok, order.detail)
+  reader.end()
+}
+
+console.log('\n发射判定与句子长度无关（旧 shouldEmit 的长度门槛不在生产路径上）')
+{
+  // read-aloud-policy.js 里的 shouldEmit() 是旧窗口发射时代的判定：
+  // 短于 MIN_SENTENCE_CHARS 又不是 force 就「先不发」。宿主今天不走它 ——
+  // 首句一识别出来就发，短成「走吧。」也一样。
+  // 于是这条判据是「生产发射路径不受句子长度门槛约束」的行为侧：
+  // 谁把按长度决定的发射判定接回 scheduler，这里立刻红。
+  const short = '走吧。'
+  check('用例句子确实短于旧门槛（否则这条判据是空的）',
+    short.length < MIN_SENTENCE_CHARS, `${short.length} vs ${MIN_SENTENCE_CHARS}`)
+  const { scheduler, events } = makeScheduler({ windowMs: 60000 })
+  const reader = scheduler.reader('s27', 'turn-1')
+  reader.push(short)
+  check('三字短句首句照样立刻发出',
+    events.length === 1 && events[0].text === short,
+    JSON.stringify(events.map((event) => event.text)))
+  reader.end()
+  playAndAck(scheduler, events, 's27', 'turn-1', { n: 0 })
+  check('收尾也不会补发第二句（不是「攒着等长度够」）',
+    events.length === 1, JSON.stringify(events.map((event) => event.text)))
+}
+
 console.log(`\n通过 ${passed}，失败 ${failed}`)
 process.exitCode = failed ? 1 : 0

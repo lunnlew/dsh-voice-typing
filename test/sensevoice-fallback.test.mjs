@@ -7,13 +7,14 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { hostModule } from './helpers/host-source.mjs'
 
 // 造一个空的 DSH_HOME
 const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-home-'))
 process.env.DSH_HOME = fakeHome
 console.log('模拟的 DSH_HOME:', fakeHome, '（里面没有 speech-to-text）')
 
-const cat = await import('../lib/model-catalog.js?nocache=' + Date.now())
+const cat = await hostModule('model-catalog', { nocache: true })
 
 let failed = 0
 function check(name, ok, detail) {

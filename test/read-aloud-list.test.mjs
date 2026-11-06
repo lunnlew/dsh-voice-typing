@@ -10,7 +10,7 @@
  * 另外 `stripForSpeech` 也没清掉中文编号（`一、`），
  * 于是会念出「一、第一项」。
  */
-import { stripForSpeech, splitSentenceParts } from '../lib/speech-clean.js'
+import { stripForSpeech, splitSentenceParts } from '../src/host/speech-clean.js'
 
 let passed = 0
 let failed = 0

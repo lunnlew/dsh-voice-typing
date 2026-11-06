@@ -1,7 +1,7 @@
 /**
  * SSE 事件信封与定时器登记（纯函数 / 无浏览器 API 依赖）。
  *
- * 这些文件被 `scripts/bundle-client.mjs` 内联进 lib/client.js，
+ * 这些文件被 `scripts/build-client.mjs` 合并进 lib/client.js，
  * 同时也可以被 Node 里的测试**原生 import**（不需要「从大文件里提取源码再求值」）。
  */
 

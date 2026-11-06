@@ -4,6 +4,8 @@
  * 覆盖（与实现契约 §7 对应）：
  *   - 新路由注册：/voice-prompt、/ui-action-result、/hotkey（后者显式标注 helper-only）；
  *   - 配置 schema 新增 6 键（accepts / rejects / sanitize 回退）+ v3 wakeWord（第 35 键）；
+ *   - POST /config 的失败回执（2b）：非法值 / 非 JSON / 非对象 / 超 1 MB / 写盘失败
+ *     一律回 `src/shared/config-error-codes.js` 里的原因码 + `detail`，句子由客户端字典出；
  *   - lib/ui-action-protocol.js 纯函数（动作枚举、参数校验、确认策略、回执校验）；
  *   - /voice-prompt：成功注入、参数 400、两条注入路径都失败 → 502、统计进 /diagnostics；
  *   - /ui-action-result：未知 requestId → 404、非法字段 → 400、回执 resolve 工具等待；
@@ -19,6 +21,10 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { hostModule } from './helpers/host-source.mjs'
+import { loadHostRoutes } from './helpers/host-routes.mjs'
+import { isHotkeyReason } from '../src/shared/hotkey-reasons.js'
+import { isConfigErrorCode } from '../src/shared/config-error-codes.js'
 
 // 必须在 import lib/index.js 之前指好 DSH_HOME（配置路径由它决定）。
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-voice-ui-host-'))
@@ -32,15 +38,17 @@ process.env.DSH_VOICE_TYPING_DISABLE_NATIVE_HOOK = '1'
 
 const {
   apply,
+  resolveRequestLanguage,
   setVoiceUiTimeoutForTest,
   setCreateUserMessageLoaderForTest,
 } = await import('../lib/index.js')
 const {
   CONFIG_SPEC_KEYS,
   VOICE_PROMPT_MODES,
+  CONFIG_DEFAULTS,
   sanitizeConfig,
   validateConfigPatch,
-} = await import('../lib/config-schema.js')
+} = await hostModule('config-schema')
 const {
   UI_ACTION_NAMES,
   UI_CONFIRM_ACTIONS,
@@ -54,9 +62,7 @@ const {
   buildUiActionPayload,
   isUiActionExpired,
   validateUiActionResult,
-} = await import('../lib/ui-action-protocol.js')
-
-const HOST_SRC = fs.readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
+} = await hostModule('ui-action-protocol')
 
 let passed = 0
 let failed = 0
@@ -272,13 +278,23 @@ console.log('== 1. 新路由注册与用途标注 ==')
     check(`${routePath} 是 exact 路由`, definition?.kind === 'exact', definition?.kind)
     check(`${routePath} 有 handler`, typeof definition?.handler === 'function')
   }
-  // route-contract：宿主注册但客户端不调的路由必须在注册处 1200 字符内显式标注。
-  const idx = HOST_SRC.indexOf("path: '/dsh-voice-typing/hotkey'")
-  const around = HOST_SRC.slice(Math.max(0, idx - 1200), idx + 400)
-  check('/hotkey 标注了 helper-only / 保留用途', /保留/.test(around), '缺少说明，route-contract 会判死链')
-  check('/hotkey 注释写明了唯一调用方', /唯一调用方/.test(around))
-  check('源码里确实广播了 global-hotkey 事件', /broadcast\('global-hotkey'/.test(HOST_SRC))
-  check('源码里确实广播了 ui-action 事件', /broadcast\('ui-action'/.test(HOST_SRC))
+  // 批次 6j 之前这里有两条源码判据：读 `path: '/dsh-voice-typing/hotkey'` 附近 1200 字符，
+  // 判注释里有没有「保留」「唯一调用方」这几个字。删掉的理由（§8.43）：
+  // 它们判的是**注释里写了什么字**，产品行为一点不跟着变；宿主注释还写着
+  // 「客户端仍用 /latest-message」，而 6j 把客户端集合收成路由表之后，表里根本没有它 ——
+  // 注释会和事实分叉，判据却照样绿。
+  // 「保留的路由必须写清用途」现在是数据：那份清单在 `test/route-contract.test.mjs` 的
+  // HOST_ONLY，值就是用途说明，说明少一条/多一条都会红（C 段与 D 段）。
+  // /hotkey 归 helper 这一半也不是靠注释：route-contract 的 E 段真跑
+  // `buildHelperScript()`，把它生成出来的 URL 的 pathname 对到宿主注册表上。
+  // 原来这里还有两条源码正则：`/broadcast\('global-hotkey'/`、`/broadcast\('ui-action'/`。
+  // 它们守的是「按了热键 / 派了界面动作之后，事件到底出不出得来」，
+  // 而这件事在本文件里已经是真跑：
+  //   · global-hotkey —— 见上面的 §6b（接一条 SSE，POST 一次 /hotkey，数广播出来的帧）；
+  //   · ui-action     —— 本文件的 voice_ui 工具那几节每次都真开 SSE 再读事件
+  //     （§7/§8 的「广播出 ui-action」「确认后才有 ui-action-result 回执」等，
+  //      判的是 res 里的 event 名与载荷字段，不是源码里有没有那行 broadcast）。
+  // 两条都已由真跑覆盖，正则删除（批次 6h，docs §8.41）。
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +306,10 @@ console.log('\n== 2. 配置 schema：新增 6 键 ==')
     newKeys.filter((key) => !CONFIG_SPEC_KEYS.includes(key)).join(','))
   // v3：第 35 键 wakeWord（全局语音待机唤醒词）。
   check('v3 wakeWord 在 schema 里', CONFIG_SPEC_KEYS.includes('wakeWord'), CONFIG_SPEC_KEYS.join(','))
-  check('宿主 DEFAULTS.wakeWord 默认「小D」', /wakeWord: '小D'/.test(HOST_SRC))
+  // 默认值住在 src/shared/config-spec.js，宿主的 DEFAULTS 就是那份对象
+  // （config-contract 里有「宿主 DEFAULTS === CONFIG_DEFAULTS」的守卫）。
+  check('宿主 DEFAULTS.wakeWord 默认「小鱼」', CONFIG_DEFAULTS.wakeWord === '小鱼',
+    JSON.stringify(CONFIG_DEFAULTS.wakeWord))
   check('wakeWord trim 归一', sanitizeConfig({ wakeWord: '  小助手  ' }, {}).config.wakeWord === '小助手',
     JSON.stringify(sanitizeConfig({ wakeWord: '  小助手  ' }, {}).config.wakeWord))
   check('wakeWord 空串合法（= 关闭唤醒词）',
@@ -352,6 +371,63 @@ console.log('\n== 2. 配置 schema：新增 6 键 ==')
       .every((key) => sanitized.warnings.some((warning) => warning.key === key)))
   const missing = sanitizeConfig({}, base)
   check('sanitize：缺省时用调用方默认值', missing.config.voicePromptMode === 'queue' && missing.config.uiConfirm === true)
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n== 2b. POST /config 的失败回执：宿主只回原因码（批次 20）==')
+{
+  // 这一节判的是**路由层**那一半：`validateConfigPatch` 的码由 config-schema 判，
+  // 但「读体失败 / 不是 JSON / 写盘失败」这三种是 catch 里的，只有真跑路由才看得到。
+  // 界面那句由客户端字典出（`pure/config-error-text.js`），所以宿主这边唯一要保证的
+  // 就是：`reason` 永远是词表内的码、永远是 ASCII、动态原文一律搬到 `detail`。
+  const host = makeHost({ rowConfig: { uiControl: true } })
+  const configJsonPath = path.join(tmpHome, 'voice-typing.json')
+  const errorShapeOf = (body) => {
+    const first = Array.isArray(body?.errors) ? body.errors[0] : null
+    return {
+      code: first?.reason,
+      hasDetail: typeof first?.detail === 'string' && first.detail.length > 0,
+      ascii: typeof first?.reason === 'string' && /^[\x00-\x7F]+$/.test(first.reason),
+    }
+  }
+  const cases = [
+    ['非法枚举值', () => callRoute(host, '/dsh-voice-typing/config', 'POST', JSON.stringify({ ttsEngine: 'bogus' })), 400, 'not-in-enum'],
+    ['请求体不是 JSON', () => callRoute(host, '/dsh-voice-typing/config', 'POST', '{oops'), 400, 'body-not-json'],
+    ['请求体是数组', () => callRoute(host, '/dsh-voice-typing/config', 'POST', '[]', { 'content-type': 'application/json' }), 400, 'patch-not-object'],
+    ['请求体超过 1 MB', () => callRoute(host, '/dsh-voice-typing/config', 'POST', Buffer.alloc(1024 * 1024 + 64, 97)), 413, 'body-too-large'],
+  ]
+  for (const [name, send, expectedStatus, expectedCode] of cases) {
+    const result = await send()
+    const shape = errorShapeOf(result.body)
+    check(`400/413：${name} → ${expectedStatus} + 码「${expectedCode}」`,
+      result.status === expectedStatus && shape.code === expectedCode,
+      JSON.stringify({ status: result.status, code: shape.code, body: result.body }))
+    check(`回执：${name} 的码在词表内且是 ASCII，detail 非空`,
+      isConfigErrorCode(shape.code) && shape.ascii && shape.hasDetail,
+      JSON.stringify(shape))
+  }
+  // 写盘失败（配置那个位置被一个同名目录占住）：以前这里会把 `error.message`
+  // 当成界面句子发出去，现在一律报 `save-failed`，原始消息只进 `detail`。
+  fs.mkdirSync(configJsonPath, { recursive: true })
+  try {
+    const failed = await callRoute(host, '/dsh-voice-typing/config', 'POST', JSON.stringify({ uiControl: false }))
+    const shape = errorShapeOf(failed.body)
+    check('写盘失败 → 5xx + 码「save-failed」（不把 error.message 当界面文案）',
+      failed.status >= 500 && shape.code === 'save-failed' && shape.hasDetail,
+      JSON.stringify({ status: failed.status, body: failed.body }))
+    check('写盘失败的回执里没有中文句子当 reason',
+      shape.ascii === true, JSON.stringify(shape))
+  } finally {
+    fs.rmSync(configJsonPath, { recursive: true, force: true })
+  }
+  // 反面对照：合法 patch 仍然是 200 + 配置本身（这一批改的只是失败那一侧）。
+  const ok = await callRoute(host, '/dsh-voice-typing/config', 'POST', JSON.stringify({ uiControl: true }))
+  check('合法 patch 仍回 200 且不带 errors',
+    ok.status === 200 && ok.body?.ok === true && !Array.isArray(ok.body?.errors),
+    JSON.stringify({ status: ok.status, keys: Object.keys(ok.body ?? {}) }))
+  // POST /config 会把配置写进临时 DSH_HOME；清掉，避免影响后续 makeHost。
+  try { fs.unlinkSync(configJsonPath) } catch { /* 忽略 */ }
+  host.disposeAll()
 }
 
 // ---------------------------------------------------------------------------
@@ -750,6 +826,146 @@ console.log('\n== 6. POST /hotkey：helper-only + token 鉴权 ==')
     diag.body?.hotkeyHelper?.enabled === false && typeof diag.body?.hotkeyHelper?.reason === 'string',
     JSON.stringify(diag.body?.hotkeyHelper))
   check('诊断：hotkeyHelper 不含 token 值', !/"token"\s*:/.test(JSON.stringify(diag.body?.hotkeyHelper)))
+  // 批次 19（docs §8.61）：诊断里那句「为什么」必须是**码**（或空串），不能是中文句子 ——
+  // 设置面板把它当界面文案的输入，宿主写句子 = 英文界面出中文。
+  // 「真宿主」这一档只有在这里才量得到：helper 单元测试跑的是假 spawn，
+  // 客户端行为测试喂的是假 /diagnostics，中间这段「宿主真报什么」两头都不管。
+  {
+    const reason = diag.body?.hotkeyHelper?.reason
+    check('诊断：hotkeyHelper 的 reason 是词表内的码或空串（宿主不写句子）',
+      (reason === '' || isHotkeyReason(reason)) && !/[^\x00-\x7F]/.test(String(reason)),
+      JSON.stringify(reason))
+    check('诊断：hotkeyHelper 带 detail（动态原文只进诊断）',
+      typeof diag.body?.hotkeyHelper?.detail === 'string' && diag.body.hotkeyHelper.detail.length > 0,
+      JSON.stringify(diag.body?.hotkeyHelper?.detail))
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n== 6b. helper 真打开时：/hotkey 的成功路径确实把 global-hotkey 广播出去了 ==')
+{
+  // 这一节替掉原来那条源码正则 `/broadcast\('global-hotkey'/`（批次 6h，docs §8.41）。
+  // 它守的事是「helper 按下热键之后，客户端到底收不收得到这条事件」——
+  // 这件事本来就能直接看：接一条 SSE，POST 一次 /hotkey，数事件。
+  // 上面 §6 之所以看不到它：那份假宿主没开 `globalHotkeyHelper`，
+  // 三道守卫第一道就挡住了（默认关），于是 §6 的 403 里**没有一条真的比过 token**。
+  //
+  // 三处注入全走 `loadHostRoutes` 的 transform，生产源码一个字没改：
+  //   1. `createHotkeyHelper` 的选项前面展开一份测试注入：
+  //      token 换成已知的（否则拿不到它就没法发合法请求），spawn 换成记一笔账的替身
+  //      （否则这条用例会在开发机上真的拉起一个常驻 PowerShell 热键监听进程）；
+  //   2. 路由里的 `helperSupported()` 显式传 `'win32'`：这条路由按**进程平台**开放，
+  //      非 Windows 上成功路径永远走不到，判据会变成「只在 Windows 绿」的假绿；
+  //      传死平台后 Linux/macOS 跑的也是同一条分支。
+  //   3. helper 写 .ps1 的位置换成测试自己的临时目录，跑完一起收摊。
+  const helperTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-hotkey-helper-'))
+  const hostHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-hotkey-host-'))
+  const token = 'test-hotkey-token-1'
+  const spawned = []
+  let killedTimes = 0
+  globalThis.__dshHotkeyTest = {
+    inject: {
+      platform: 'win32',
+      tmpDir: helperTmp,
+      createToken: () => token,
+      spawnImpl: (command, args, opts) => {
+        spawned.push({ command, args, opts })
+        // 假子进程：helper 会挂 once('error'/'exit') 和 stdout/stderr 的 data，
+        // 这里都不回 READY —— 状态停在 starting，路由不看它（看的是 token 与配置）。
+        return {
+          pid: 4242,
+          once() { return this },
+          on() { return this },
+          kill() { killedTimes += 1 },
+          stdout: { on() {} },
+          stderr: { on() {} },
+        }
+      },
+    },
+  }
+  let host = null
+  try {
+    host = await loadHostRoutes({
+      dshHome: hostHome,
+      rowConfig: { globalHotkeyHelper: true, globalVoice: true, globalShortcut: 'Ctrl+Alt+V' },
+      transform: (code, file) => {
+        if (file !== 'index.js') return code
+        return code
+          .replace(
+            'const hotkeyHelper = createHotkeyHelper({',
+            'const hotkeyHelper = createHotkeyHelper({ ...globalThis.__dshHotkeyTest.inject,',
+          )
+          .replace('!helperSupported()', "!helperSupported('win32')")
+      },
+      requireRewrite: [
+        ['热键 helper 的 token / spawn / tmpDir 换成测试注入',
+          'const hotkeyHelper = createHotkeyHelper({',
+          'createHotkeyHelper({ ...globalThis.__dshHotkeyTest.inject,'],
+        ['路由的平台判定收到测试平台（跨机器都能走成功路径）',
+          '!helperSupported()',
+          "!helperSupported('win32')"],
+      ],
+    })
+    const stream = host.openStream()
+    const send = (body, tok = token, headers = {}) => host.request('/dsh-voice-typing/hotkey', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-dsh-voice-token': tok, ...headers },
+      body: JSON.stringify(body),
+    })
+    const ok = await send({ action: 'toggle' })
+    check('helper 已开 + token 正确 → /hotkey 回 200（§6 那份默认关闭的宿主走不到这条）',
+      ok.statusCode === 200 && ok.json?.()?.ok === true,
+      `status=${ok.statusCode} ${ok.text}`)
+    const frames = stream.events()
+    const hotkeyFrames = frames.filter((e) => e.event === 'global-hotkey')
+    check('/hotkey 成功那一次真的广播出一条 global-hotkey（不是源码里写着 broadcast）',
+      hotkeyFrames.length === 1, JSON.stringify(frames.map((f) => f.event)))
+    check(
+      '广播出去的载荷与信封：action=toggle、sessionId 为 null（全局事件，不属于任何会话）',
+      hotkeyFrames[0]?.data?.action === 'toggle' && hotkeyFrames[0]?.data?.sessionId === null,
+      JSON.stringify(hotkeyFrames[0]?.data),
+    )
+    const afterOk = stream.events().length
+    const badToken = await send({ action: 'toggle', }, token + '-not')
+    check('helper 开着但 token 不对 → 403（这次是真的在做 token 比对）',
+      badToken.statusCode === 403, `status=${badToken.statusCode} ${badToken.text}`)
+    const wrongHelper = await host.request('/dsh-voice-typing/hotkey', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'toggle' }),
+    })
+    check('不带 token 头 → 403，且不广播', wrongHelper.statusCode === 403
+      && stream.events().length === afterOk, `status=${wrongHelper.statusCode}`)
+    check('token 不对的那次一条事件都没多发',
+      stream.events().length === afterOk,
+      JSON.stringify({ before: afterOk, after: stream.events().length }))
+    const badAction = await send({ action: 'mute' })
+    check('动作不是 toggle → 400', badAction.statusCode === 400
+      && badAction.json?.()?.error?.code === 'invalid_action', `status=${badAction.statusCode} ${badAction.text}`)
+    check('非法动作同样不广播', stream.events().length === afterOk,
+      `事件数 ${stream.events().length}，成功那次之后是 ${afterOk}`)
+    // helper 自己的状态从 /diagnostics 读：这条路由不看 helper 是否已经 REGISTER 成功，
+    // 但诊断必须如实报告它卡在 starting（不能谎报 enabled）。
+    const diag = await host.request('/dsh-voice-typing/diagnostics')
+    const helperState = diag.json?.()?.hotkeyHelper ?? {}
+    check('诊断里的 helper 状态如实报告「还没确认注册成功」',
+      helperState.enabled === false && typeof helperState.status === 'string'
+        && !/"token"\s*:/.test(JSON.stringify(helperState)),
+      JSON.stringify(helperState))
+    stream.close()
+    host.restore()
+    host = null
+  } finally {
+    if (host) host.restore()
+    delete globalThis.__dshHotkeyTest
+    for (const dir of [helperTmp, hostHome]) {
+      try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }) } catch { /* 忽略 */ }
+    }
+  }
+  check('helper 确实被拉起来过，而且拉起的是替身（测试没有真起 powershell 常驻进程）',
+    spawned.length === 1 && spawned[0].command === 'powershell.exe'
+      && String(spawned[0].args?.at(-1) ?? '').endsWith('.ps1'),
+    JSON.stringify(spawned.map((s) => ({ command: s.command, args: s.args?.slice(-1) }))))
 }
 
 // ---------------------------------------------------------------------------
@@ -1224,6 +1440,17 @@ console.log('\n== 10. /diagnostics 新增字段职责分离 ==')
     typeof diag.body?.hotkeyHelper?.enabled === 'boolean' && typeof diag.body?.hotkeyHelper?.reason === 'string')
   check('诊断仍带协议版本 3', diag.body?.protocol === 3)
   check('诊断不带 config 本身（职责分离）', !('model' in (diag.body ?? {})))
+}
+
+console.log('\n== 9. /transcribe 的语言头解析（白名单 + 退回当前生效语言）==')
+{
+  check('合法语言头覆盖配置', resolveRequestLanguage('zh', 'en') === 'zh')
+  check('带空白的合法值也能识别', resolveRequestLanguage('  JA ', 'auto') === 'ja')
+  check('非法语言头退回配置（不是退回 auto）', resolveRequestLanguage('zh-CN', 'en') === 'en')
+  check('auto 头退回配置', resolveRequestLanguage('auto', 'zh') === 'zh')
+  check('缺失头退回配置', resolveRequestLanguage(undefined, 'zh') === 'zh')
+  check('非字符串头退回配置', resolveRequestLanguage(123, 'yue') === 'yue')
+  check('空串头退回配置', resolveRequestLanguage('', 'ko') === 'ko')
 }
 
 console.log(`\n通过 ${passed}，失败 ${failed}`)

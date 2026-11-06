@@ -1,5 +1,0 @@
-# 不打进 npm 包的东西
-lib/cuda-node
-**/node_modules
-*.tgz
-.tmp*

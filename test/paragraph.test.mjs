@@ -12,7 +12,7 @@
  * 流式语义：末尾**没有**空行的段是「未完成」的，放进 `rest` 等下一块补全
  * （或流结束时由 finally 发掉），**不**算作已完成段落。
  */
-import { splitParagraphs } from '../lib/paragraph.js'
+import { splitParagraphs } from '../src/host/paragraph.js'
 
 let passed = 0
 let failed = 0

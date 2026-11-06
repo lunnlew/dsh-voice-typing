@@ -182,7 +182,7 @@ console.log('\n== 2b. 全局语音 / AI 界面操控的新键：默认值与保�
       globalHotkeyHelper: get.body?.globalHotkeyHelper,
     }))
   // v3 第 35 键：默认开启唤醒词（空串才表示关闭）。
-  check('wakeWord 默认「小D」', get.body?.wakeWord === '小D', JSON.stringify(get.body?.wakeWord))
+  check('wakeWord 默认「小鱼」', get.body?.wakeWord === '小鱼', JSON.stringify(get.body?.wakeWord))
 
   const saved = await postConfig(host, {
     globalVoice: true,

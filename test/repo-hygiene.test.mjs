@@ -14,10 +14,14 @@
  *   2. 没有别的插件名（尤其那个明确禁止出现的）
  *   3. 没有编码损坏（U+FFFD 替换字符）
  *   4. 文档里写的路由都真实存在
+ *   5. 每个 test/*.test.mjs 都有跑法（漏进 `npm test` 串 = 一条从没生效过的守卫）
+ *   6. 构建产物（`lib/`）不在版本库里（批次 23）
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { hostSource } from './helpers/host-source.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 
@@ -32,7 +36,7 @@ function check(name, ok, detail) {
 const files = []
 function walk(dir) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (['node_modules', '.git', 'vendor', 'fixtures'].includes(e.name)) continue
+    if (['node_modules', '.git', 'fixtures'].includes(e.name)) continue
     const p = path.join(dir, e.name)
     if (e.isDirectory()) { walk(p); continue }
     if (!/\.(js|mjs|cjs|json|md|yml|yaml)$/.test(e.name)) continue
@@ -102,7 +106,9 @@ console.log('\n编码损坏（U+FFFD 替换字符）')
 
 console.log('\n文档里写的路由必须真实存在')
 {
-  const idx = fs.readFileSync(path.join(root, 'lib/index.js'), 'utf8')
+  // 路由注册表在**手写源码**里读（第 6.5 步之后 lib/index.js 是产物，
+  // 产物里没有 `path: '/xxx'` 这种源码写法的可能——位置由 helper 解析）。
+  const idx = hostSource('index')
   const registered = new Set(
     [...idx.matchAll(/path: '\/dsh-voice-typing([^']*)'/g)].map((m) => m[1]),
   )
@@ -140,6 +146,52 @@ console.log('\n测试不依赖固定路径')
   check('测试里没有硬编码路径', hits.length === 0, hits.join(', '))
   const fixtures = path.join(testDir, 'fixtures')
   check('fixtures 目录里有测试音频', fs.existsSync(path.join(fixtures, 'zh-test.wav')))
+}
+
+console.log('\n测试文件都在 npm test 的串跑清单里')
+{
+  // 为什么要有这条：`npm test` 是一条 `&&` 串（见 package.json），
+  // 新增一个 test/*.test.mjs 忘了接上去，它就只有人手动跑的时候才跑过 ——
+  // 表现出来是「CI 全绿但这条守卫从没生效」，和永久绿灯是一回事。
+  const scripts = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).scripts
+  // 检查是否使用了自动测试运行器（scripts/run-tests.mjs 会自动发现并运行所有测试文件）
+  const usesAutoRunner = /node scripts\/run-tests\.mjs/.test(String(scripts.test ?? ''))
+  const chained = new Set(
+    [...String(scripts.test ?? '').matchAll(/node (test\/[^\s&]+\.mjs)/g)].map((m) => m[1]),
+  )
+  const ownRunners = new Set(
+    Object.entries(scripts)
+      .filter(([name, cmd]) => name !== 'test' && /node test\/[^\s&]+\.mjs/.test(String(cmd)))
+      .flatMap(([, cmd]) => [...String(cmd).matchAll(/node (test\/[^\s&]+\.mjs)/g)].map((m) => m[1])),
+  )
+  const onDisk = fs.readdirSync(path.join(root, 'test'))
+    .filter((f) => f.endsWith('.test.mjs'))
+    .map((f) => `test/${f}`)
+    .sort()
+  // 如果使用了自动运行器，所有测试文件都被覆盖
+  const orphans = usesAutoRunner ? [] : onDisk.filter((f) => !chained.has(f) && !ownRunners.has(f))
+  check(`磁盘上 ${onDisk.length} 个测试文件都有跑法（串跑或自己的 npm script${usesAutoRunner ? '，或使用自动运行器' : ''}）`,
+    orphans.length === 0, `没人跑：${orphans.join(', ')}`)
+  const stale = [...chained].filter((f) => !onDisk.includes(f))
+  check('串跑清单里没有已经不存在的文件', stale.length === 0, stale.join(', '))
+}
+
+console.log('\n构建产物不在版本库里（批次 23）')
+{
+  // 为什么要有这条：`lib/` 退出版本库之后，「谁又把它 add 回来了」这种事不会有任何别的地方报错 ——
+  // 磁盘上本来就得有那几个文件（DSH 装机的符号链接读的就是它们），产物入库和出库在运行时看不出区别，
+  // 只有 git 能分辨。这里两条一起判：一条看**事实**（跟踪列表里没有 lib 下的文件），
+  // 一条看**规则**（`.gitignore` 那条 `/lib/` 真的在起作用，不是写了个不匹配的路径自我安慰）。
+  const git = (args) => spawnSync('git', args, { cwd: root, encoding: 'utf8' })
+  if (git(['rev-parse', '--is-inside-work-tree']).status !== 0) {
+    console.log('  ⏭ 跳过：这里不是 git 工作树（发布物里没有 .git），这条守卫没法判')
+  } else {
+    const tracked = String(git(['ls-files', '--', 'lib']).stdout).split('\n').filter(Boolean)
+    check('版本库里没有 lib/ 下的任何文件（构建产物不入库）', tracked.length === 0,
+      `还被跟踪：${tracked.join(', ')}`)
+    check('.gitignore 那条规则真的挡住了 lib/client.js', git(['check-ignore', '-q', '--', 'lib/client.js']).status === 0,
+      'git check-ignore 没认它是忽略文件')
+  }
 }
 
 console.log(`\n通过 ${passed}，失败 ${failed}`)

@@ -1,23 +1,24 @@
 /**
- * UI 动作协议测试：客户端镜像的行为 + 与宿主 `lib/ui-action-protocol.js` 的双端一致性。
+ * UI 动作协议测试：判据行为 + 「三个入口是不是同一份实现」。
  *
- * 为什么必须双端一致：
+ * 为什么这条判据必须只有一份：
  *   宿主在广播 `ui-action` 前校验一次，渲染器执行前再校验一次 ——
  *   任一边的规则漂移，都会让「宿主放行、客户端拒绝」或反过来，
  *   而模型/用户看到的只是莫名的 confirm_denied / unknown_action。
- *   这里用**同一张用例表**同时跑两份模块，逐条比较返回值的 JSON。
- *
- * 宿主模块还没落盘时（实现期）只跑客户端行为测试并打印警告；
- * 落盘后一致性检查自动生效（verifier 的完整测试会覆盖）。
+ *   第 3 步 3.2 之前是「宿主一份 + 客户端镜像一份」，靠本文件逐条比对两端返回值防分叉；
+ *   现在实现在 `src/shared/ui-action-protocol.js`，`lib/ui-action-protocol.js` 与
+ *   `src/client/pure/ui-action-protocol.js` 都只是转发入口 ——
+ *   比对换成了两件事：**用例覆盖度**（每条动作/每条错误路径都得有用例）
+ *   和**导出面 + 绑定同一性**（转发少写一个名字、或某侧还留一份拷贝，都会红）。
  *
  * 用法：node test/ui-action-protocol.test.mjs
  */
 import fs from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import * as client from '../src/client/pure/ui-action-protocol.js'
+import { hostSourcePath } from './helpers/host-source.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
-const HOST_PATH = root + '/lib/ui-action-protocol.js'
 
 let passed = 0
 let failed = 0
@@ -26,9 +27,16 @@ function check(name, ok, detail = '') {
   else { failed++; console.log('  ✗ ' + name + (detail ? '：' + detail : '')) }
 }
 
-/** 按 JSON 比较两个返回值（对象键顺序在两份实现里也应当一致）。 */
+/** 按 JSON 比较两个返回值（键顺序由实现决定，比对两侧时要用它兜住顺序差异）。 */
 function same(a, b) {
   return JSON.stringify(a) === JSON.stringify(b)
+}
+
+/** 两组导出名的差集（少了/多了哪些名字），空则返回「无」。 */
+function diffNames(a, b) {
+  const set = new Set([...a, ...b])
+  const out = [...set].filter((n) => !(a.includes(n) && b.includes(n)))
+  return out.length ? out.join(', ') : '无'
 }
 
 /* ================================================================ */
@@ -281,228 +289,111 @@ console.log('\n行为：动作描述 / 回执校验 / 载荷构造')
 }
 
 /* ================================================================ */
-console.log('\n与宿主 lib/ui-action-protocol.js 双端一致性')
-const hostExists = fs.existsSync(HOST_PATH)
-if (!hostExists) {
-  console.log('  ⚠ 跳过：宿主模块 lib/ui-action-protocol.js 还没落盘（实现期正常；完整测试会跑一致性）')
-  check('宿主模块存在（落盘后必须通过）', true, '实现期跳过')
-} else {
-  const host = await import(pathToFileURL(HOST_PATH).href)
-  check('宿主模块可 import', Boolean(host))
-
-  // 1) 常量完全一致
-  check('UI_ACTION_NAMES 双端一致',
-    same(host.UI_ACTION_NAMES, client.UI_ACTION_NAMES),
-    `${JSON.stringify(host.UI_ACTION_NAMES)} vs ${JSON.stringify(client.UI_ACTION_NAMES)}`)
-  check('UI_CONFIRM_ACTIONS 双端一致',
-    same(host.UI_CONFIRM_ACTIONS, client.UI_CONFIRM_ACTIONS))
-  check('UI_ACTION_LIMITS 双端一致',
-    same(host.UI_ACTION_LIMITS, client.UI_ACTION_LIMITS))
-  if (host.UI_ACTION_PARAMS !== undefined || client.UI_ACTION_PARAMS !== undefined) {
-    check('UI_ACTION_PARAMS 双端一致', same(host.UI_ACTION_PARAMS, client.UI_ACTION_PARAMS))
-    check('UI_ACTION_REQUIRED 双端一致', same(host.UI_ACTION_REQUIRED, client.UI_ACTION_REQUIRED))
-  }
-
-  // 2) 规格：每个动作 + 未知动作 + 大小写/空白
-  const actionCases = [
-    ...client.UI_ACTION_NAMES,
-    ' State ', 'SWITCH_SESSION', 'click_element', '', null, 42,
-  ]
-  let specMismatch = 0
-  for (const action of actionCases) {
-    if (!same(host.getUiActionSpec(action), client.getUiActionSpec(action))) specMismatch += 1
-    if (!same(host.getUiActionSpec(action), client.getUiActionSpec(action))) {
-      console.log('    spec 不一致:', JSON.stringify(action))
-    }
-  }
-  check(`getUiActionSpec 在 ${actionCases.length} 个用例上一致`, specMismatch === 0, `不一致 ${specMismatch} 个`)
-
-  // 3) 确认策略
-  let confirmMismatch = 0
-  for (const action of actionCases) {
-    if (host.actionNeedsConfirm(action) !== client.actionNeedsConfirm(action)) confirmMismatch += 1
-  }
-  check(`actionNeedsConfirm 在 ${actionCases.length} 个用例上一致`, confirmMismatch === 0)
-
-  // 4) 参数校验：共享用例表（覆盖每条错误路径）
+console.log('\n用例表覆盖度（每条路径都要有用例，别再靠「两份对比」发现漏项）')
+{
+  // 这张表原来只用来做宿主/客户端逐条比对；单源化之后比对失去意义
+  // （两端本来就是同一个实现）。它剩下的价值是**覆盖度**：
+  // 每个动作、每条错误路径都得有用例，否则改了实现会有路径静默没测。
   const validateCases = [
-    ['state', {}],
-    ['state', null],
-    ['state', { extra: 'x' }],
-    ['list_sessions', undefined],
-    ['toggle_sidebar', { sessionId: 'x' }],
-    ['switch_session', {}],
-    ['switch_session', { sessionId: '  ' }],
-    ['switch_session', { sessionId: ' s1 ' }],
-    ['switch_session', { sessionId: 123 }],
+    ['state', {}], ['state', null], ['state', { extra: 'x' }],
+    ['list_sessions', undefined], ['toggle_sidebar', { sessionId: 'x' }],
+    ['switch_session', {}], ['switch_session', { sessionId: '  ' }],
+    ['switch_session', { sessionId: ' s1 ' }], ['switch_session', { sessionId: 123 }],
     ['switch_session', { sessionId: 's'.repeat(201) }],
     ['switch_session', { sessionId: 's'.repeat(200) }],
-    ['new_session', {}],
-    ['new_session', { workspaceId: 'ws-1' }],
-    ['new_session', { workspaceId: '' }],
+    ['new_session', {}], ['new_session', { workspaceId: 'ws-1' }], ['new_session', { workspaceId: '' }],
     ['new_session', { workspaceId: 'w'.repeat(201) }],
-    ['run_command', {}],
-    ['run_command', { line: '/compact' }],
-    ['run_command', { line: '  /compact  ' }],
-    ['run_command', { line: '/a\n/b' }],
-    ['run_command', { line: '/a\r/b' }],
-    ['run_command', { line: 'l'.repeat(401) }],
-    ['run_command', { line: 'l'.repeat(400) }],
-    ['send_prompt', {}],
-    ['send_prompt', { text: 'hello' }],
-    ['send_prompt', { text: '  hello  ', sessionId: 's1' }],
-    ['send_prompt', { text: '' }],
-    ['send_prompt', { text: 'x'.repeat(4001) }],
-    ['send_prompt', { text: 42 }],
+    ['run_command', {}], ['run_command', { line: '/compact' }], ['run_command', { line: '  /compact  ' }],
+    ['run_command', { line: '/a\n/b' }], ['run_command', { line: '/a\r/b' }],
+    ['run_command', { line: 'l'.repeat(401) }], ['run_command', { line: 'l'.repeat(400) }],
+    ['send_prompt', {}], ['send_prompt', { text: 'hello' }],
+    ['send_prompt', { text: '  hello  ', sessionId: 's1' }], ['send_prompt', { text: '' }],
+    ['send_prompt', { text: 'x'.repeat(4001) }], ['send_prompt', { text: 42 }],
     ['send_prompt', { text: 'hi', extra: 'drop' }],
-    ['stop_generation', {}],
-    ['stop_generation', { sessionId: 's1' }],
-    ['stop_generation', { sessionId: ' ' }],
-    ['bogus', {}],
-    ['', { text: 'x' }],
-    [' Run_Command ', { line: '/help' }],
-    // ---- v2：semantic + a11y 动作 ----
-    ['set_sidebar', {}],
-    ['set_sidebar', { collapsed: true }],
-    ['set_sidebar', { collapsed: false }],
-    ['set_sidebar', { collapsed: null }],
-    ['set_sidebar', { collapsed: 'true' }],
-    ['set_sidebar', { collapsed: 1 }],
+    ['stop_generation', {}], ['stop_generation', { sessionId: 's1' }], ['stop_generation', { sessionId: ' ' }],
+    ['bogus', {}], ['', { text: 'x' }], [' Run_Command ', { line: '/help' }],
+    ['set_sidebar', {}], ['set_sidebar', { collapsed: true }], ['set_sidebar', { collapsed: false }],
+    ['set_sidebar', { collapsed: null }], ['set_sidebar', { collapsed: 'true' }], ['set_sidebar', { collapsed: 1 }],
     ['set_sidebar', { collapsed: true, extra: 'drop' }],
-    ['open_plugins', {}],
-    ['open_plugins', { x: 1 }],
-    ['ui_snapshot', {}],
-    ['ui_snapshot', null],
-    ['ui_snapshot', { ref: 'e1' }],
-    ['ui_click', {}],
-    ['ui_click', { ref: 'e12' }],
-    ['ui_click', { ref: ' e12 ' }],
-    ['ui_click', { ref: 'e'.repeat(40) }],
-    ['ui_click', { ref: 'e'.repeat(41) }],
-    ['ui_click', { ref: 3 }],
-    ['ui_type', { ref: 'e1' }],
-    ['ui_type', { text: '你好' }],
-    ['ui_type', { ref: 'e1', text: '你好' }],
+    ['open_plugins', {}], ['open_plugins', { x: 1 }],
+    ['ui_snapshot', {}], ['ui_snapshot', null], ['ui_snapshot', { ref: 'e1' }],
+    ['ui_click', {}], ['ui_click', { ref: 'e12' }], ['ui_click', { ref: ' e12 ' }],
+    ['ui_click', { ref: 'e'.repeat(40) }], ['ui_click', { ref: 'e'.repeat(41) }], ['ui_click', { ref: 3 }],
+    ['ui_type', { ref: 'e1' }], ['ui_type', { text: '你好' }], ['ui_type', { ref: 'e1', text: '你好' }],
     ['ui_type', { ref: 'e1', text: 'x'.repeat(4001) }],
-    ['ui_key', {}],
-    ['ui_key', { key: 'Escape' }],
-    ['ui_key', { key: 'Ctrl+K' }],
-    ['ui_key', { key: 'k'.repeat(40) }],
-    ['ui_key', { key: 'k'.repeat(41) }],
+    ['ui_key', {}], ['ui_key', { key: 'Escape' }], ['ui_key', { key: 'Ctrl+K' }],
+    ['ui_key', { key: 'k'.repeat(40) }], ['ui_key', { key: 'k'.repeat(41) }],
     [' SwitcH_Session ', { sessionId: 's1' }],
   ]
-  let validateMismatch = 0
-  for (const [action, params] of validateCases) {
-    const a = host.validateUiAction(action, params)
-    const b = client.validateUiAction(action, params)
-    if (!same(a, b)) {
-      validateMismatch += 1
-      console.log('    校验不一致:', JSON.stringify({ action, params }), JSON.stringify(a), JSON.stringify(b))
-    }
+  const covered = new Set(validateCases.map(([action]) => String(action).trim().toLowerCase()))
+  const uncovered = client.UI_ACTION_NAMES.filter((a) => !covered.has(a))
+  check(`表里 ${validateCases.length} 条用例覆盖全部 ${client.UI_ACTION_NAMES.length} 个动作`,
+    uncovered.length === 0, `没覆盖：${uncovered.join(', ')}`)
+  for (const code of ['unknown_action', 'missing_param:', 'param_too_long:', 'invalid_param:']) {
+    const hit = validateCases.some(([action, params]) =>
+      String(client.validateUiAction(action, params).error ?? '').includes(code))
+    check(`错误路径 ${code} 有用例`, hit, '没有用例打到这条分支，改实现时它可能静默失效')
   }
-  check(`validateUiAction 在 ${validateCases.length} 个用例上一致`, validateMismatch === 0,
-    `不一致 ${validateMismatch} 个`)
-
-  // 5) 描述
-  const describeCases = [
-    ['state', {}],
-    ['send_prompt', { text: '帮我总结一下' }],
-    ['send_prompt', { text: 'x'.repeat(200) }],
-    ['switch_session', { sessionId: 'abc' }],
-    ['bogus', {}],
-    // ---- v2 ----
-    ['set_sidebar', { collapsed: true }],
-    ['set_sidebar', { collapsed: false }],
-    ['ui_click', { ref: 'e3' }],
-    ['ui_key', { key: 'Ctrl+K' }],
-    ['ui_type', { ref: 'e1', text: 'abc' }],
-    ['ui_snapshot', {}],
-    ['open_plugins', {}],
-  ]
-  let describeMismatch = 0
-  for (const [action, params] of describeCases) {
-    if (host.describeUiAction(action, params) !== client.describeUiAction(action, params)) describeMismatch += 1
-  }
-  check(`describeUiAction 在 ${describeCases.length} 个用例上一致`, describeMismatch === 0)
-
-  // 6) 宿主额外导出（客户端也镜像了同一份代码，顺带校验）
-  if (typeof host.buildUiActionPayload === 'function' && typeof client.buildUiActionPayload === 'function') {
-    // 宿主 task-17 与客户端 task-18 并行加 expiresAt：宿主还没更新时只比较旧字段，
-    // 更新后自动纳入完整比较（同一份用例表，避免两边字段顺序/取值漂移）。
-    const hostSupportsExpiry = (() => {
-      try {
-        const probe = host.buildUiActionPayload({ requestId: 'probe', action: 'state', params: {}, confirm: false, expiresAt: 123 })
-        return Object.prototype.hasOwnProperty.call(probe, 'expiresAt')
-      } catch {
-        return false
-      }
-    })()
-    if (!hostSupportsExpiry) {
-      console.log('  ⚠ 宿主 buildUiActionPayload 还没有 expiresAt（task-17 并行中）；本轮只比较非过期字段')
-    }
-    const payloadCases = [
-      { requestId: 'r1', sessionId: 's1', action: 'send_prompt', params: { text: 'hi' }, confirm: true },
-      { requestId: 'r2', sessionId: null, action: 'toggle_sidebar', params: {}, confirm: false },
-      { requestId: '', action: 'bogus', params: { x: 1 }, confirm: 'yes' },
-      // task-18 用例：expiresAt 透传 / 非法省略
-      { requestId: 'r3', action: 'state', params: {}, confirm: false, expiresAt: 1700000000000 },
-      { requestId: 'r4', action: 'state', params: {}, confirm: false, expiresAt: undefined },
-      { requestId: 'r5', action: 'state', params: {}, confirm: false, expiresAt: NaN },
-    ]
-    let payloadMismatch = 0
-    for (const input of payloadCases) {
-      let hostPayload = host.buildUiActionPayload(input)
-      const clientPayload = client.buildUiActionPayload(input)
-      if (!hostSupportsExpiry) {
-        // 宿主还没字段：把客户端刚加的 expiresAt 摘掉再比旧字段（避免并行期假红）。
-        hostPayload = { ...hostPayload }
-        delete hostPayload.expiresAt
-        const clientWithout = { ...clientPayload }
-        delete clientWithout.expiresAt
-        if (!same(hostPayload, clientWithout)) payloadMismatch += 1
-        continue
-      }
-      if (!same(hostPayload, clientPayload)) {
-        payloadMismatch += 1
-        console.log('    载荷不一致:', JSON.stringify(input), JSON.stringify(hostPayload), JSON.stringify(clientPayload))
-      }
-    }
-    check('buildUiActionPayload 双端一致（含 expiresAt）', payloadMismatch === 0)
-  }
-  if (typeof host.validateUiActionResult === 'function' && typeof client.validateUiActionResult === 'function') {
-    const resultCases = [
-      { requestId: 'r1', ok: true },
-      { requestId: 'r1', ok: false, error: 'confirm_denied', value: { cancelled: true } },
-      { requestId: '  ', ok: true },
-      { requestId: 'r1', ok: 'yes' },
-      { requestId: 'r1', ok: false, error: 42 },
-      null,
-      [],
-    ]
-    let resultMismatch = 0
-    for (const input of resultCases) {
-      if (!same(host.validateUiActionResult(input), client.validateUiActionResult(input))) resultMismatch += 1
-    }
-    check('validateUiActionResult 双端一致', resultMismatch === 0)
-  }
-  // 宿主也导出 isUiActionExpired 时做同表比较（宿主没有则客户端自测已覆盖边界）。
-  if (typeof host.isUiActionExpired === 'function' && typeof client.isUiActionExpired === 'function') {
-    const expiryCases = [
-      [{}, 1000],
-      [null, 1000],
-      [{ expiresAt: NaN }, 1000],
-      [{ expiresAt: '1000' }, 2000],
-      [{ expiresAt: 1000 }, 999],
-      [{ expiresAt: 1000 }, 1000],
-      [{ expiresAt: 1000 }, 1001],
-    ]
-    let expiryMismatch = 0
-    for (const [payload, now] of expiryCases) {
-      if (host.isUiActionExpired(payload, now) !== client.isUiActionExpired(payload, now)) expiryMismatch += 1
-    }
-    check(`isUiActionExpired 在 ${expiryCases.length} 个用例上一致`, expiryMismatch === 0)
-  }
+  check('合法用例都返回 ok:true 且 action 已归一化',
+    validateCases.every(([action, params]) => {
+      const r = client.validateUiAction(action, params)
+      return r.ok === true ? typeof r.action === 'string' && r.action === String(action).trim().toLowerCase() : true
+    }))
 }
 
+/* ================================================================ */
+console.log('\n宿主入口 / 浏览器入口 / shared 是同一份实现（单源化的守卫）')
+{
+  // 「宿主入口」住在哪由 helpers/host-source.mjs 解析（6.5 搬进 src/host/ 之后照样能找到），
+  // 这条要守的是「入口只是转发，实现仍然只有 shared 那一份」。
+  // 原来这里第一条是 `fs.existsSync(HOST_PATH)`（批次 6i，docs §8.42）：
+  // 入口文件在不在，下面那句**真的 import** 就是它的判据 —— 路径错了整个文件直接红，
+  // 而且「存在」本身不是目的，「能加载并且导出的就是 shared 那一份」才是（下面那圈绑定同一性判的正是这件事）。
+  const HOST_PATH = `${root}/${hostSourcePath('ui-action-protocol')}`
+  const SHARED_PATH = root + '/src/shared/ui-action-protocol.js'
+  check('实现 src/shared/ui-action-protocol.js 存在', fs.existsSync(SHARED_PATH))
+  const host = await import(pathToFileURL(HOST_PATH).href)
+  const shared = await import(pathToFileURL(SHARED_PATH).href)
+  const names = Object.keys(shared).sort()
+  check('shared 模块确实有导出（非空扫描）', names.length >= 12, `只有 ${names.length} 个`)
+  check('宿主入口的导出面与 shared 完全一致',
+    JSON.stringify(Object.keys(host).sort()) === JSON.stringify(names),
+    `宿主多/少：${diffNames(names, Object.keys(host))}`)
+  check('浏览器入口的导出面与 shared 完全一致',
+    JSON.stringify(Object.keys(client).sort()) === JSON.stringify(names),
+    `浏览器多/少：${diffNames(names, Object.keys(client))}`)
+  // 逐个比**绑定本身**：转发少写一个名字、或者某一侧还留着一份拷贝，这里都会红。
+  for (const name of names) {
+    check(`${name}：宿主入口与浏览器入口都是 shared 的那一个`,
+      Object.is(host[name], shared[name]) && Object.is(client[name], shared[name]))
+  }
+  // 走宿主入口真跑几条：证明转发生效的不是「空壳」，而是能判定的实现。
+  check('宿主入口 validateUiAction 结果正确（trim + 归一化）',
+    same(host.validateUiAction('send_prompt', { text: ' 你好 ' }),
+      { ok: true, action: 'send_prompt', params: { text: '你好' } }))
+  check('宿主入口 actionNeedsConfirm 对 a11y 动作是 true',
+    host.actionNeedsConfirm('ui_type') === true && host.actionNeedsConfirm('ui_snapshot') === false)
+  check('宿主入口 buildUiActionPayload 带上有限 expiresAt',
+    host.buildUiActionPayload({ requestId: 'r', action: 'state', expiresAt: 123 }).expiresAt === 123)
+  check('宿主入口 isUiActionExpired 边界（now == expiresAt 不算过期）',
+    host.isUiActionExpired({ expiresAt: 1000 }, 1000) === false
+    && host.isUiActionExpired({ expiresAt: 1000 }, 1001) === true)
+}
+
+/* ================================================================ */
+// 这一节原来有两条扫源码的判据（批次 6i，docs §8.42）：
+//   · 「浏览器入口只做转发（没有第二份 ACTION_SPECS）」—— 扫 pure/ui-action-protocol.js 里
+//     有没有 `const ACTION_SPECS = {`。上面那圈**绑定同一性**（`Object.is(client[name], shared[name])`，
+//     名字来自 `Object.keys(shared)`，ACTION_SPECS 也在其中）判的是同一件事而且更宽：
+//     入口哪怕只有一份本地拷贝、只要导出的不是 shared 的那一个，那里就红。
+//     「抄了一份但暂时一模一样」不属于本文件范围，它归 test/bundle-sync.test.mjs 的全仓反分叉扫描
+//     （标记是 `hasOwnProperty.call(ACTION_SPECS`，范围是全部手写源码文件）。
+//   · 「main.js 里没有自己的一份动作白名单」—— 扫 main.js 里有没有 `const UI_ACTION_NAMES =`。
+//     **删**：main.js 对这个名字只做「import 进来 → 挂到导出面」（第 71 行与第 574 行），
+//     客户端内部没有任何一处读它，全仓也没有一条测试读那份导出（动作全集由 voice-ui-host 判
+//     工具 schema 的 enum，宿主侧由本文件判两端返回值）。所以在 main.js 里再写一份白名单
+//     **行为上分不出写法** —— 没有任何一次运行会因此不同。
+//     推翻条件：哪天客户端真的拿它做校验或展示（比如按钮按名单过滤动作），
+//     那时要的不是这条正则，而是「客户端实际用的名单 == 协议名单」的数据比对。
 console.log(`\n通过 ${passed}，失败 ${failed}`)
 process.exitCode = failed ? 1 : 0
